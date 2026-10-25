@@ -1,0 +1,17 @@
+# Cloud-Relay der ELVIS-App. Einrichten: siehe README, Abschnitt „App-Anbindung“.
+name = "elvis-relay"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+# Eigene Domain (Zone h2com.eu im selben Cloudflare-Konto); Cloudflare legt DNS-Eintrag und Zertifikat an
+routes = [{ pattern = "elvis-app.h2com.eu", custom_domain = true }]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "elvis-relay"
+# Nach `npx wrangler d1 create elvis-relay` die ausgegebene ID eintragen
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
+
+# Aufräumen: Positionen nach 24 h, verwaiste Geräte nach 90 Tagen
+[triggers]
+crons = ["17 * * * *"]
