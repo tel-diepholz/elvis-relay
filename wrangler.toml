@@ -1,4 +1,4 @@
-# Cloud-Relay der ELVIS-App. Einrichten: siehe README, Abschnitt „App-Anbindung“.
+# Cloud-Relay der ELVIS-App. Einrichten: siehe README.
 name = "elvis-relay"
 main = "src/index.ts"
 compatibility_date = "2025-09-01"
@@ -8,8 +8,7 @@ routes = [{ pattern = "elvis-app.h2com.eu", custom_domain = true }]
 [[d1_databases]]
 binding = "DB"
 database_name = "elvis-relay"
-# Nach `npx wrangler d1 create elvis-relay` die ausgegebene ID eintragen
-database_id = "00000000-0000-0000-0000-000000000000"
+database_id = "1c15b913-764b-441e-870c-b0b6061c3a83"
 migrations_dir = "migrations"
 
 # Aufräumen: Positionen nach 24 h, verwaiste Geräte nach 90 Tagen
