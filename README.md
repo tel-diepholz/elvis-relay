@@ -8,7 +8,7 @@ Einsatzleitwagen (ELW). ELVIS holt die Positionen ausgehend ab, der ELW braucht 
 App ──HTTPS──▶ Relay (Cloudflare Worker + D1) ◀──Abruf alle 15 s── ELVIS im ELW
 ```
 
-Es läuft unter **`https://elvis-app.h2com.eu`**. Diese Adresse ist in ELVIS und in der App als Vorgabe eingebaut.
+Es läuft unter **`https://elvis-relay.hhansen06.workers.dev`**. Diese Adresse ist in ELVIS und in der App als Vorgabe eingebaut.
 
 ## Ablauf
 
@@ -47,7 +47,7 @@ Das Protokoll ist in `src/protocol.ts` beschrieben. Gegenstück in ELVIS: `packa
 
 ## Einrichten
 
-Einmalig, mit einem Cloudflare-Konto, in dem die Zone `h2com.eu` liegt (Free-Tier genügt):
+Einmalig, mit einem Cloudflare-Konto (Free-Tier genügt):
 
 ```sh
 npm install
@@ -56,8 +56,10 @@ npx wrangler d1 create elvis-relay   # ausgegebene database_id in wrangler.toml 
 npm run deploy                        # Schema anlegen und Worker veröffentlichen
 ```
 
-Die eigene Domain ist in `wrangler.toml` unter `routes` eingetragen; DNS-Eintrag und Zertifikat legt Cloudflare
-beim Deploy an.
+Der Worker läuft unter der `workers.dev`-Adresse des Kontos (`workers_dev = true` in `wrangler.toml`). Eine eigene
+Domain per `routes` ginge nur, wenn ihre Zone im selben Cloudflare-Konto liegt. Eine Subdomain einer Zone, die
+anderswo verwaltet wird (z. B. bei Hetzner), lässt sich im Free-Tarif nicht an Cloudflare delegieren. Bei einem
+Wechsel der Adresse müssen ELVIS (`app.relayUrl`) und die App (Vorgabe in `app/build.gradle`) angepasst werden.
 
 ### Automatisch veröffentlichen
 
@@ -66,7 +68,7 @@ Workflow auch neue Migrationen an.
 
 | Secret | Inhalt |
 | --- | --- |
-| `CLOUDFLARE_API_TOKEN` | API-Token mit den Rechten *Workers Scripts: Edit*, *D1: Edit*, *Workers Routes: Edit* (Zone `h2com.eu`) |
+| `CLOUDFLARE_API_TOKEN` | API-Token mit den Rechten *Workers Scripts: Edit* und *D1: Edit* |
 | `CLOUDFLARE_ACCOUNT_ID` | Konto-ID aus dem Cloudflare-Dashboard |
 
 ## Entwickeln

@@ -2,8 +2,8 @@
 name = "elvis-relay"
 main = "src/index.ts"
 compatibility_date = "2025-09-01"
-# Eigene Domain (Zone h2com.eu im selben Cloudflare-Konto); Cloudflare legt DNS-Eintrag und Zertifikat an
-routes = [{ pattern = "elvis-app.h2com.eu", custom_domain = true }]
+# Erreichbar unter https://elvis-relay.<konto>.workers.dev (eine eigene Domain bräuchte die Zone bei Cloudflare)
+workers_dev = true
 
 [[d1_databases]]
 binding = "DB"
