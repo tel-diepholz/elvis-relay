@@ -31,6 +31,11 @@ Es läuft unter **`https://elvis-relay.hhansen06.workers.dev`**. Diese Adresse i
 | `PUT /v1/elws/me/pairings/:deviceId` | ELVIS | Bezeichnung ändern |
 | `DELETE /v1/elws/me/pairings/:deviceId` | ELVIS | entkoppeln |
 | `GET /v1/elws/me/positions?after=<seq>` | ELVIS | Positionen abholen (höchstens 500 je Abruf) |
+| `POST /v1/elws/me/forms` | ELVIS | Formular-Link anlegen `{ title, publicKey (JWK), expiresAt }` → `{ formId, url }` |
+| `DELETE /v1/elws/me/forms/:formId` | ELVIS | Link beenden (nicht abgeholte Bögen bleiben bis zur Abholung) |
+| `GET /v1/elws/me/submissions?after=<seq>` | ELVIS | eingereichte (verschlüsselte) Personalbögen abholen |
+| `GET /p/:formId` | Einheitsführer | Online-Formular für Personalbögen |
+| `POST /p/:formId` | Formular | verschlüsselten Bogen einreichen |
 | `GET /datenschutz` | alle | Datenschutzhinweise der App (Play Store) |
 
 Die Zugangsschlüssel werden als `Authorization: Bearer …` übergeben; das Relay speichert nur ihren SHA-256-Hash.
@@ -38,6 +43,11 @@ Das Protokoll ist in `src/protocol.ts` beschrieben. Gegenstück in ELVIS: `packa
 Änderungen an beiden Stellen gleich halten.
 
 ## Datenschutz
+
+- Personalbögen verschlüsselt der Browser mit dem öffentlichen Schlüssel des ELW (RSA-OAEP-256 + AES-256-GCM,
+  Formular-ID als Zusatzdaten). Das Relay kann sie nicht lesen; es löscht sie mit der Abholung, spätestens nach
+  7 Tagen. Formular-Links gelten höchstens 7 Tage, höchstens 200 Bögen je Link. Die Formularseite läuft mit strenger
+  CSP, `no-referrer` und `noindex` (die Adresse ist der Zugang).
 
 - Das Relay kennt nur zufällige IDs, keine Namen oder Telefonnummern.
 - Positionen löscht es mit der Abholung durch den ELW, spätestens nach 24 Stunden (stündlicher Cron).

@@ -1,13 +1,15 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
+import { webcrypto, generateKeyPairSync } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { DeviceRegistration, DeviceStatus, ElwPositionBatch, ElwRegistration } from './protocol.js';
-import { cleanup, handle, MAX_CODE_ATTEMPTS, type Env } from './relay.js';
+import type { DeviceRegistration, DeviceStatus, ElwPositionBatch, ElwRegistration, RelayForm, RelaySubmissionBatch } from './protocol.js';
+import { cleanup, handle, MAX_CODE_ATTEMPTS, MAX_FORM_SUBMISSIONS, type Env } from './relay.js';
 
 /** D1 im Speicher (nur das, was der Worker nutzt) */
 function fakeD1(): D1Database {
   const db = new Database(':memory:');
-  db.exec(readFileSync(new URL('../migrations/0001_init.sql', import.meta.url), 'utf8'));
+  const dir = new URL('../migrations/', import.meta.url);
+  for (const f of readdirSync(dir).sort()) db.exec(readFileSync(new URL(f, dir), 'utf8'));
   const prepare = (sql: string, args: unknown[] = []) => ({
     bind: (...a: unknown[]) => prepare(sql, a),
     first: async () => db.prepare(sql).get(...args) ?? null,
@@ -136,5 +138,86 @@ describe('App-Relay', () => {
     const res = await handle(new Request('https://relay.test/datenschutz'), env);
     expect(res.status).toBe(200);
     expect(await res.text()).toContain('Datenschutz');
+  });
+});
+
+const publicKey = () => {
+  const jwk = generateKeyPairSync('rsa', { modulusLength: 2048 }).publicKey.export({ format: 'jwk' }) as { n: string; e: string };
+  return { kty: 'RSA', n: jwk.n, e: jwk.e, alg: 'RSA-OAEP-256', ext: true, key_ops: ['encrypt'] };
+};
+const sealed = () => ({ alg: 'RSA-OAEP-256+A256GCM', key: 'a2V5', iv: 'aXY=', data: Buffer.from(webcrypto.getRandomValues(new Uint8Array(64))).toString('base64') });
+
+async function page(path: string, init: RequestInit = {}) {
+  const res = await handle(new Request(`https://relay.test${path}`, init), env, now);
+  return { status: res.status, headers: res.headers, text: await res.text() };
+}
+
+describe('Online-Formular', () => {
+  async function form(hours = 24) {
+    const { elw } = await registered();
+    const expiresAt = new Date(now.getTime() + hours * 3600_000).toISOString();
+    const res = await call<RelayForm>('POST', '/v1/elws/me/forms', { token: elw.token, body: { title: 'ELW 1 · B3 <Brand>', publicKey: publicKey(), expiresAt } });
+    return { elw, res };
+  }
+
+  it('stellt das Formular bereit und reicht verschlüsselte Bögen an den ELW weiter', async () => {
+    const { elw, res } = await form();
+    expect(res.status).toBe(201);
+    expect(res.body.url).toBe(`https://relay.test/p/${res.body.formId}`);
+    expect(res.body.formId).toMatch(/^[A-Za-z0-9_-]{22}$/);
+
+    const html = await page(`/p/${res.body.formId}`);
+    expect(html.status).toBe(200);
+    expect(html.text).toContain('Einheit / Fahrzeug');
+    expect(html.text).toContain('ELW 1 · B3 &lt;Brand&gt;');
+    expect(html.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(html.headers.get('content-security-policy')).toContain("default-src 'none'");
+
+    const post = (body: unknown) => page(`/p/${res.body.formId}`, { method: 'POST', body: JSON.stringify(body) });
+    expect((await post(sealed())).status).toBe(201);
+    expect((await post({ unitLabel: 'Klartext' })).status).toBe(400);
+    const batch = await call<RelaySubmissionBatch>('GET', '/v1/elws/me/submissions?after=0', { token: elw.token });
+    expect(batch.body.items).toHaveLength(1);
+    expect(batch.body.items[0]).toMatchObject({ formId: res.body.formId, payload: { alg: 'RSA-OAEP-256+A256GCM' } });
+
+    // Mit dem Cursor bestätigt: gelöscht
+    const next = await call<RelaySubmissionBatch>('GET', `/v1/elws/me/submissions?after=${batch.body.next}`, { token: elw.token });
+    expect(next.body.items).toHaveLength(0);
+    const other = (await call<ElwRegistration>('POST', '/v1/elws')).body;
+    expect((await call<RelaySubmissionBatch>('GET', '/v1/elws/me/submissions?after=0', { token: other.token })).body.items).toHaveLength(0);
+  });
+
+  it('beendet Links: gelöscht, abgelaufen, unbekannt', async () => {
+    const { elw, res } = await form(1);
+    const { formId } = res.body;
+    await page(`/p/${formId}`, { method: 'POST', body: JSON.stringify(sealed()) });
+    expect((await call('DELETE', `/v1/elws/me/forms/${formId}`, { token: elw.token })).status).toBe(204);
+    expect((await page(`/p/${formId}`)).status).toBe(410);
+    expect((await page(`/p/${formId}`, { method: 'POST', body: JSON.stringify(sealed()) })).status).toBe(410);
+    // Vor dem Beenden eingereicht: bleibt bis zur Abholung
+    expect((await call<RelaySubmissionBatch>('GET', '/v1/elws/me/submissions?after=0', { token: elw.token })).body.items).toHaveLength(1);
+
+    const second = (await form(1)).res.body;
+    now = new Date(now.getTime() + 2 * 3600_000);
+    expect((await page(`/p/${second.formId}`)).status).toBe(410);
+    expect((await page('/p/AAAAAAAAAAAAAAAAAAAAAA')).status).toBe(410);
+
+    now = new Date(now.getTime() + 8 * 24 * 3600_000);
+    await cleanup(env, now);
+    // Nach 7 Tagen nicht abgeholt: gelöscht
+    expect((await call<RelaySubmissionBatch>('GET', '/v1/elws/me/submissions?after=0', { token: elw.token })).body.items).toHaveLength(0);
+  });
+
+  it('prüft Gültigkeit, Schlüssel und Anzahl', async () => {
+    const { elw } = await registered();
+    const create = (body: unknown) => call('POST', '/v1/elws/me/forms', { token: elw.token, body });
+    expect((await create({ title: '', publicKey: publicKey(), expiresAt: new Date(now.getTime() + 8 * 24 * 3600_000).toISOString() })).status).toBe(400);
+    expect((await create({ title: '', publicKey: { kty: 'RSA', n: 'x', e: 'AQAB', alg: 'RSA-OAEP-256' }, expiresAt: new Date(now.getTime() + 3600_000).toISOString() })).status).toBe(400);
+    expect((await call('POST', '/v1/elws/me/forms', { body: {} })).status).toBe(401);
+
+    const { res } = await form();
+    expect((await page(`/p/${res.body.formId}`, { method: 'POST', body: 'x'.repeat(400 * 1024) })).status).toBe(413);
+    for (let i = 0; i < MAX_FORM_SUBMISSIONS; i++) await page(`/p/${res.body.formId}`, { method: 'POST', body: JSON.stringify(sealed()) });
+    expect((await page(`/p/${res.body.formId}`, { method: 'POST', body: JSON.stringify(sealed()) })).status).toBe(429);
   });
 });

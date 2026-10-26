@@ -1,4 +1,9 @@
 import {
+  encryptedSheetSchema,
+  relayFormRequestSchema,
+  type RelayForm,
+  type RelaySubmission,
+  type RelaySubmissionBatch,
   DEVICE_ID_ALPHABET,
   DEVICE_ID_LENGTH,
   PAIR_CODE_LENGTH,
@@ -11,12 +16,14 @@ import {
   type ElwRegistration,
   type RelayPositionItem,
 } from './protocol.js';
+import { closedPage, formHeaders, formPage } from './form.js';
 import { PRIVACY_HTML } from './privacy.js';
 
 /**
  * Cloud-Relay der ELVIS-App. Apps melden sich an und senden ihre Position; ein ELW (ELVIS-Server) koppelt
- * eine App mit ID und Code und holt die Positionen ab. Es wird nur gespeichert, was dafür nötig ist:
- * Positionen werden mit der Abholung gelöscht, spätestens nach 24 Stunden.
+ * eine App mit ID und Code und holt die Positionen ab. Außerdem stellt es Online-Formulare für Personalbögen
+ * bereit, die der Browser für den ELW verschlüsselt. Es wird nur gespeichert, was dafür nötig ist:
+ * Positionen werden mit der Abholung gelöscht, spätestens nach 24 Stunden; Personalbögen spätestens nach 7 Tagen.
  */
 export interface Env {
   DB: D1Database;
@@ -28,6 +35,22 @@ const BATCH = 500;
 const POSITION_TTL_MS = 24 * 3600_000;
 const DEVICE_TTL_MS = 90 * 24 * 3600_000;
 const ELW_TTL_MS = 365 * 24 * 3600_000;
+const SUBMISSION_TTL_MS = 7 * 24 * 3600_000;
+/** Ein Formular-Link gilt höchstens so lange */
+const FORM_MAX_MS = 7 * 24 * 3600_000;
+/** Bögen je Formular – genug für einen Verband, bremst Missbrauch */
+export const MAX_FORM_SUBMISSIONS = 200;
+const MAX_SUBMISSION_BYTES = 300 * 1024;
+const SUBMISSION_BATCH = 100;
+
+interface FormRow {
+  id: string;
+  elw_id: string;
+  title: string;
+  public_key: string;
+  expires_at: string;
+  submissions: number;
+}
 
 interface DeviceRow {
   id: string;
@@ -45,7 +68,10 @@ const json = (status: number, body: unknown) =>
 const fail = (status: number, error: string) => json(status, { error });
 
 const random = (n: number) => crypto.getRandomValues(new Uint8Array(n));
-const newToken = () => btoa(String.fromCharCode(...random(32))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const base64url = (b: Uint8Array) => btoa(String.fromCharCode(...b)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const newToken = () => base64url(random(32));
+/** Formular-ID: steht in der Adresse und ist zugleich der Zugang (128 Bit) */
+const newFormId = () => base64url(random(16));
 const newDeviceId = () => [...random(DEVICE_ID_LENGTH)].map((b) => DEVICE_ID_ALPHABET[b & 31]).join('');
 const newCode = () => String(new DataView(random(4).buffer).getUint32(0) % 10 ** PAIR_CODE_LENGTH).padStart(PAIR_CODE_LENGTH, '0');
 
@@ -88,6 +114,38 @@ export async function handle(req: Request, env: Env, now = new Date()): Promise<
   }
   if (req.method === 'GET' && path === '/') return new Response('ELVIS App-Relay\n', { headers: { 'content-type': 'text/plain; charset=utf-8' } });
   if (req.method === 'GET' && path === '/datenschutz') return new Response(PRIVACY_HTML, { headers: { 'content-type': 'text/html; charset=utf-8' } });
+
+  // --- Online-Formular (öffentlich, die Adresse ist der Zugang) ---
+
+  const page = /^\/p\/([A-Za-z0-9_-]{22})$/.exec(path);
+  if (page) {
+    const form = await db.prepare('SELECT * FROM forms WHERE id = ? AND expires_at > ?').bind(page[1], ts).first<FormRow>();
+    if (req.method === 'GET') {
+      const nonce = newToken();
+      if (!form) return new Response(closedPage(nonce), { status: 410, headers: formHeaders(nonce) });
+      return new Response(formPage({ nonce, formId: form.id, title: form.title, expiresAt: form.expires_at, publicKey: JSON.parse(form.public_key) }), { headers: formHeaders(nonce) });
+    }
+    if (req.method === 'POST') {
+      if (!form) return fail(410, 'Dieser Link ist abgelaufen oder wurde beendet');
+      if (form.submissions >= MAX_FORM_SUBMISSIONS) return fail(429, 'Für diesen Link sind keine weiteren Bögen möglich');
+      const raw = await req.text();
+      if (raw.length > MAX_SUBMISSION_BYTES) return fail(413, 'Personalbogen zu groß');
+      let parsed: ReturnType<typeof encryptedSheetSchema.safeParse>;
+      try {
+        parsed = encryptedSheetSchema.safeParse(JSON.parse(raw));
+      } catch {
+        return fail(400, 'Personalbogen ungültig');
+      }
+      if (!parsed.success) return fail(400, 'Personalbogen ungültig');
+      await db.prepare('UPDATE forms SET submissions = submissions + 1 WHERE id = ?').bind(form.id).run();
+      await db
+        .prepare('INSERT INTO submissions (form_id, elw_id, payload, received_at) VALUES (?, ?, ?, ?)')
+        .bind(form.id, form.elw_id, JSON.stringify(parsed.data), ts)
+        .run();
+      return json(201, { ok: true });
+    }
+    return fail(405, 'Nicht erlaubt');
+  }
 
   // --- App ---
 
@@ -187,6 +245,37 @@ export async function handle(req: Request, env: Env, now = new Date()): Promise<
       }
     }
 
+    if (req.method === 'POST' && path === '/v1/elws/me/forms') {
+      const parsed = relayFormRequestSchema.safeParse(await body(req));
+      if (!parsed.success) return fail(400, 'Formular ungültig');
+      const { title, publicKey, expiresAt } = parsed.data;
+      if (expiresAt <= ts || new Date(expiresAt).getTime() - now.getTime() > FORM_MAX_MS) return fail(400, 'Gültigkeit höchstens 7 Tage');
+      const formId = newFormId();
+      await db
+        .prepare('INSERT INTO forms (id, elw_id, title, public_key, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)')
+        .bind(formId, elw.id, title, JSON.stringify(publicKey), ts, new Date(expiresAt).toISOString())
+        .run();
+      return json(201, { formId, url: `${url.origin}/p/${formId}` } satisfies RelayForm);
+    }
+
+    const formPath = /^\/v1\/elws\/me\/forms\/([A-Za-z0-9_-]+)$/.exec(path);
+    if (req.method === 'DELETE' && formPath) {
+      // Eingereichte, noch nicht abgeholte Bögen bleiben bis zur Abholung
+      const r = await db.prepare('DELETE FROM forms WHERE id = ? AND elw_id = ?').bind(formPath[1], elw.id).run();
+      return r.meta.changes ? json(204, null) : fail(404, 'Formular nicht gefunden');
+    }
+
+    if (req.method === 'GET' && path === '/v1/elws/me/submissions') {
+      const after = Math.max(0, Math.floor(Number(url.searchParams.get('after') ?? 0)) || 0);
+      await db.prepare('DELETE FROM submissions WHERE elw_id = ? AND seq <= ?').bind(elw.id, after).run();
+      const rows = await db
+        .prepare('SELECT seq, form_id, payload, received_at FROM submissions WHERE elw_id = ? AND seq > ? ORDER BY seq LIMIT ?')
+        .bind(elw.id, after, SUBMISSION_BATCH)
+        .all<{ seq: number; form_id: string; payload: string; received_at: string }>();
+      const items: RelaySubmission[] = rows.results.map((r) => ({ seq: r.seq, formId: r.form_id, submittedAt: r.received_at, payload: JSON.parse(r.payload) }));
+      return json(200, { items, next: items.at(-1)?.seq ?? after } satisfies RelaySubmissionBatch);
+    }
+
     if (req.method === 'GET' && path === '/v1/elws/me/positions') {
       const after = Math.max(0, Math.floor(Number(url.searchParams.get('after') ?? 0)) || 0);
       // Was der ELW mit diesem Cursor bestätigt, wird nicht mehr gebraucht
@@ -212,9 +301,13 @@ export async function handle(req: Request, env: Env, now = new Date()): Promise<
   return fail(404, 'Nicht gefunden');
 }
 
-/** Stündlich: alte Positionen, verwaiste Apps und ELWs löschen */
+/** Stündlich: alte Positionen und Personalbögen, abgelaufene Formulare, verwaiste Apps und ELWs löschen */
 export async function cleanup(env: Env, now = new Date()): Promise<void> {
   const before = (ms: number) => new Date(now.getTime() - ms).toISOString();
+  await env.DB.prepare('DELETE FROM submissions WHERE received_at < ?').bind(before(SUBMISSION_TTL_MS)).run();
+  await env.DB.prepare('DELETE FROM forms WHERE expires_at < ?').bind(now.toISOString()).run();
+  await env.DB.prepare('DELETE FROM submissions WHERE elw_id IN (SELECT id FROM elws WHERE last_seen < ?)').bind(before(ELW_TTL_MS)).run();
+  await env.DB.prepare('DELETE FROM forms WHERE elw_id IN (SELECT id FROM elws WHERE last_seen < ?)').bind(before(ELW_TTL_MS)).run();
   await env.DB.prepare('DELETE FROM positions WHERE received_at < ?').bind(before(POSITION_TTL_MS)).run();
   await env.DB.prepare('DELETE FROM positions WHERE device_id IN (SELECT id FROM devices WHERE last_seen < ?)').bind(before(DEVICE_TTL_MS)).run();
   await env.DB.prepare('DELETE FROM devices WHERE last_seen < ?').bind(before(DEVICE_TTL_MS)).run();

@@ -80,3 +80,73 @@ export interface ElwPositionBatch {
   /** Cursor für den nächsten Abruf */
   next: number;
 }
+
+// --- Online-Formular (Personalbögen) ---
+// Gegenstück in ELVIS: packages/shared/src/personnel.ts
+
+/** Öffentlicher RSA-Schlüssel des ELW als JWK (WebCrypto importKey 'jwk') */
+export const rsaPublicJwkSchema = z.object({
+  kty: z.literal('RSA'),
+  n: z.string().min(300).max(1100),
+  e: z.string().max(16),
+  alg: z.literal('RSA-OAEP-256'),
+  ext: z.literal(true).default(true),
+  key_ops: z.tuple([z.literal('encrypt')]).default(['encrypt']),
+});
+
+/** ELW → Relay: Formular anlegen */
+export const relayFormRequestSchema = z.object({
+  /** Überschrift im Formular, z. B. „ELW 1 Diepholz · B3 Wohnungsbrand“ */
+  title: z.string().trim().max(200),
+  publicKey: rsaPublicJwkSchema,
+  expiresAt: z.string().datetime(),
+});
+export type RelayFormRequest = z.input<typeof relayFormRequestSchema>;
+
+export interface RelayForm {
+  formId: string;
+  url: string;
+}
+
+/** Verschlüsselter Personalbogen (alles Base64): AES-Schlüssel per RSA-OAEP-256, Inhalt AES-256-GCM mit der Formular-ID als Zusatzdaten */
+export const encryptedSheetSchema = z.object({
+  alg: z.literal('RSA-OAEP-256+A256GCM'),
+  key: z.string().max(1024),
+  iv: z.string().max(32),
+  data: z.string().max(256 * 1024),
+});
+export type EncryptedSheet = z.infer<typeof encryptedSheetSchema>;
+
+export interface RelaySubmission {
+  seq: number;
+  formId: string;
+  submittedAt: string;
+  payload: EncryptedSheet;
+}
+
+export interface RelaySubmissionBatch {
+  items: RelaySubmission[];
+  next: number;
+}
+
+/** Inhalt des Bogens (nur im Browser und im ELW lesbar) – Felder und Grenzen wie personInputSchema in ELVIS */
+export const PERSON_GRADES = [
+  ['crew', 'Mannschaft'],
+  ['subLeader', 'Unterführer'],
+  ['leader', 'Führer'],
+] as const;
+export const QUALIFICATION_SUGGESTIONS = [
+  'Atemschutz',
+  'Maschinist',
+  'Sprechfunk',
+  'Truppführer',
+  'Gruppenführer',
+  'Zugführer',
+  'Verbandsführer',
+  'Sanitäter',
+  'CSA',
+  'Motorsäge',
+  'Führerschein C',
+  'Führerschein CE',
+];
+export const MAX_SHEET_PERSONS = 60;
