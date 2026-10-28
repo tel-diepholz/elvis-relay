@@ -91,6 +91,8 @@ export async function runStatusChecks(env: Env, now = new Date()): Promise<void>
 
     const id = crypto.randomUUID();
     const domain = env.MAIL_DOMAIN ?? 'einsatzleitwagen.app';
+    // Vor dem Versand eintragen: Cloudflare stellt oft zu, bevor send() zurückkommt
+    await db.prepare('INSERT INTO status_probes (id, sent_at) VALUES (?, ?)').bind(id, ts).run();
     const send = await timed(async () => {
       await env.SEND!(
         `status@${domain}`,
@@ -98,7 +100,7 @@ export async function runStatusChecks(env: Env, now = new Date()): Promise<void>
         buildMime({ from: `status@${domain}`, to: `${PROBE_LOCALPART}@${domain}`, subject: 'ELVIS Statusprüfung', text: id, headers: { 'X-Elvis-Probe': id }, date: now }),
       );
     });
-    if (send.ok) await db.prepare('INSERT INTO status_probes (id, sent_at) VALUES (?, ?)').bind(id, ts).run();
+    if (!send.ok) await db.prepare('DELETE FROM status_probes WHERE id = ?').bind(id).run();
 
     const outOk = send.ok && (await eventsOk(env, 'outbound', now));
     const inOk = arrived && (await eventsOk(env, 'inbound', now));

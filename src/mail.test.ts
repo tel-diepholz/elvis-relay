@@ -337,6 +337,16 @@ describe('Statusseite', () => {
     expect((await status()).components.find((c) => c.id === 'api')!.status).toBe('degraded');
   });
 
+  it('verbucht Testmails, die schon während des Versands ankommen', async () => {
+    // Wie in Produktion: der email()-Handler läuft, bevor send() zurückkommt (beforeEach-SEND stellt synchron zu)
+    await runStatusChecks(env, now);
+    const probe = await env.DB.prepare('SELECT received_at FROM status_probes').first<{ received_at: string | null }>();
+    expect(probe?.received_at).toBe(now.toISOString());
+    now = new Date(now.getTime() + 5 * 60_000);
+    await runStatusChecks(env, now);
+    expect((await status()).components.find((c) => c.id === 'inbound')!.status).toBe('ok');
+  });
+
   it('verwaltet Störungsmeldungen nur mit Token', async () => {
     await runStatusChecks(env, now);
     const post = (token: string) =>
