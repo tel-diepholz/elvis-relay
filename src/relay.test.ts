@@ -1,23 +1,8 @@
-import { readFileSync, readdirSync } from 'node:fs';
 import { webcrypto, generateKeyPairSync } from 'node:crypto';
-import Database from 'better-sqlite3';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { DeviceRegistration, DeviceStatus, ElwPositionBatch, ElwRegistration, RelayForm, RelaySubmissionBatch } from './protocol.js';
 import { cleanup, handle, MAX_CODE_ATTEMPTS, MAX_FORM_SUBMISSIONS, type Env } from './relay.js';
-
-/** D1 im Speicher (nur das, was der Worker nutzt) */
-function fakeD1(): D1Database {
-  const db = new Database(':memory:');
-  const dir = new URL('../migrations/', import.meta.url);
-  for (const f of readdirSync(dir).sort()) db.exec(readFileSync(new URL(f, dir), 'utf8'));
-  const prepare = (sql: string, args: unknown[] = []) => ({
-    bind: (...a: unknown[]) => prepare(sql, a),
-    first: async () => db.prepare(sql).get(...args) ?? null,
-    all: async () => ({ results: db.prepare(sql).all(...args) }),
-    run: async () => ({ meta: { changes: db.prepare(sql).run(...args).changes } }),
-  });
-  return { prepare } as unknown as D1Database;
-}
+import { fakeD1 } from './testing.js';
 
 let env: Env;
 let now = new Date('2026-10-25T10:00:00Z');

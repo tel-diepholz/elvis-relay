@@ -19,6 +19,8 @@ export const PRIVACY_HTML = `<!doctype html>
 <p>Nur der gekoppelte ELW. Dieser Dienst leitet die Positionen weiter und löscht sie mit der Abholung, spätestens nach 24 Stunden. Im ELW werden sie mit dem Einsatz dokumentiert.</p>
 <h2>Wie lange?</h2>
 <p>Die Ortung endet, wenn Sie sie in der App stoppen, die Einsatzleitung entkoppelt oder der Einsatz endet. Nicht mehr genutzte App-IDs werden nach 90 Tagen gelöscht. „App zurücksetzen“ löscht die App-ID sofort.</p>
+<h2>E-Mail der ELWs</h2>
+<p>Ein ELW kann ein Postfach unter einsatzleitwagen.app haben. Eingehende Mails speichert dieser Dienst nur mit dem Schlüssel des ELW verschlüsselt und löscht sie mit der Abholung, spätestens nach 30 Tagen. Gespeichert sind außerdem die Adresse des Postfachs, die Kontaktadresse des Administrators und Zeitpunkt und Land des letzten Abrufs.</p>
 </body>
 </html>
 `;
