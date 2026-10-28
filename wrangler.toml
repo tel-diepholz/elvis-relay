@@ -5,12 +5,35 @@ compatibility_date = "2025-09-01"
 # Erreichbar unter https://elvis-relay.<konto>.workers.dev (eine eigene Domain bräuchte die Zone bei Cloudflare)
 workers_dev = true
 
+# WKD (Web Key Directory) der ELW-Postfächer: openpgpkey.einsatzleitwagen.app (Zone im selben Konto)
+routes = [
+  { pattern = "openpgpkey.einsatzleitwagen.app", custom_domain = true },
+]
+
+[vars]
+MAIL_DOMAIN = "einsatzleitwagen.app"
+RELAY_URL = "https://elvis-relay.hhansen06.workers.dev"
+# "manual": Postfächer nach der Bestätigung erst nach Freigabe durch den Betreiber aktiv (siehe README)
+MAIL_APPROVAL = ""
+# Betreiber-Adresse für Statusalarme (leer = keine)
+STATUS_ALERT_EMAIL = ""
+# Secret (nicht hier): npx wrangler secret put STATUS_ADMIN_TOKEN
+
 [[d1_databases]]
 binding = "DB"
 database_name = "elvis-relay"
 database_id = "1c15b913-764b-441e-870c-b0b6061c3a83"
 migrations_dir = "migrations"
 
-# Aufräumen: Positionen nach 24 h, verwaiste Geräte nach 90 Tagen
+# Verschlüsselte Mails bis zur Abholung durch den ELW
+[[r2_buckets]]
+binding = "MAIL"
+bucket_name = "elvis-mail"
+
+# Versand (Cloudflare Email Sending für einsatzleitwagen.app)
+[[send_email]]
+name = "MAILER"
+
+# Stündlich aufräumen (Positionen nach 24 h, verwaiste Geräte nach 90 Tagen, Mail), alle 5 Minuten Statusprüfung
 [triggers]
-crons = ["17 * * * *"]
+crons = ["17 * * * *", "*/5 * * * *"]

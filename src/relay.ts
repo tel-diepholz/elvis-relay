@@ -17,16 +17,34 @@ import {
   type RelayPositionItem,
 } from './protocol.js';
 import { closedPage, formHeaders, formPage } from './form.js';
+import { base64url, bearer, body, fail, hash, json, newToken, random, sameCode } from './http.js';
+import { handleConfirm, handleMail, handleWkd, mailCleanup, type Sender } from './mail.js';
 import { PRIVACY_HTML } from './privacy.js';
+import { handleStatus } from './status.js';
 
 /**
  * Cloud-Relay der ELVIS-App. Apps melden sich an und senden ihre Position; ein ELW (ELVIS-Server) koppelt
  * eine App mit ID und Code und holt die Positionen ab. Außerdem stellt es Online-Formulare für Personalbögen
  * bereit, die der Browser für den ELW verschlüsselt. Es wird nur gespeichert, was dafür nötig ist:
  * Positionen werden mit der Abholung gelöscht, spätestens nach 24 Stunden; Personalbögen spätestens nach 7 Tagen.
+ * Dazu kommt ein Postfach je ELW (mail.ts) und die Statusseite (status.ts).
  */
 export interface Env {
   DB: D1Database;
+  /** Verschlüsselte Mails bis zur Abholung */
+  MAIL?: R2Bucket;
+  /** Domain der Postfächer, Vorgabe einsatzleitwagen.app */
+  MAIL_DOMAIN?: string;
+  /** "manual": Postfächer brauchen nach der Bestätigung die Freigabe des Betreibers */
+  MAIL_APPROVAL?: string;
+  /** Öffentliche Adresse des Relays für Links in Mails */
+  RELAY_URL?: string;
+  /** Secret für Störungsmeldungen auf der Statusseite */
+  STATUS_ADMIN_TOKEN?: string;
+  /** Betreiber-Adresse für Statusalarme */
+  STATUS_ALERT_EMAIL?: string;
+  /** Mailversand, von index.ts aus dem send_email-Binding gebaut */
+  SEND?: Sender;
 }
 
 /** Fehlversuche beim Code, danach bekommt die App einen neuen */
@@ -60,43 +78,10 @@ interface DeviceRow {
   label: string;
 }
 
-const json = (status: number, body: unknown) =>
-  new Response(body === null ? null : JSON.stringify(body), {
-    status,
-    headers: { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*' },
-  });
-const fail = (status: number, error: string) => json(status, { error });
-
-const random = (n: number) => crypto.getRandomValues(new Uint8Array(n));
-const base64url = (b: Uint8Array) => btoa(String.fromCharCode(...b)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-const newToken = () => base64url(random(32));
 /** Formular-ID: steht in der Adresse und ist zugleich der Zugang (128 Bit) */
 const newFormId = () => base64url(random(16));
 const newDeviceId = () => [...random(DEVICE_ID_LENGTH)].map((b) => DEVICE_ID_ALPHABET[b & 31]).join('');
 const newCode = () => String(new DataView(random(4).buffer).getUint32(0) % 10 ** PAIR_CODE_LENGTH).padStart(PAIR_CODE_LENGTH, '0');
-
-async function hash(token: string): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token));
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
-}
-
-/** Gleichlange Zeichenketten in konstanter Zeit vergleichen */
-function sameCode(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
-}
-
-const bearer = (req: Request) => /^Bearer (\S+)$/.exec(req.headers.get('authorization') ?? '')?.[1] ?? null;
-
-async function body(req: Request): Promise<unknown> {
-  try {
-    return await req.json();
-  } catch {
-    return null;
-  }
-}
 
 const status = (d: DeviceRow): DeviceStatus => ({ paired: d.elw_id !== null, label: d.elw_id ? d.label : '', code: d.elw_id ? null : d.code });
 
@@ -109,11 +94,18 @@ export async function handle(req: Request, env: Env, now = new Date()): Promise<
   if (req.method === 'OPTIONS') {
     return new Response(null, {
       status: 204,
-      headers: { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET, POST, PUT, DELETE', 'access-control-allow-headers': 'authorization, content-type' },
+      headers: { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET, POST, PUT, PATCH, DELETE', 'access-control-allow-headers': 'authorization, content-type, x-elvis-signature' },
     });
   }
   if (req.method === 'GET' && path === '/') return new Response('ELVIS App-Relay\n', { headers: { 'content-type': 'text/plain; charset=utf-8' } });
   if (req.method === 'GET' && path === '/datenschutz') return new Response(PRIVACY_HTML, { headers: { 'content-type': 'text/html; charset=utf-8' } });
+
+  // --- Mail: Schlüsselverzeichnis, Bestätigungslinks, Statusseite (öffentlich) ---
+
+  if (req.method === 'GET' && path.startsWith('/.well-known/openpgpkey/')) return (await handleWkd(path, env)) ?? fail(404, 'Nicht gefunden');
+  const confirm = /^\/m\/confirm\/([A-Za-z0-9_-]{43})$/.exec(path);
+  if (confirm) return handleConfirm(req, env, confirm[1]!, now);
+  if (path.startsWith('/v1/status')) return (await handleStatus(req, env, path, now)) ?? fail(404, 'Nicht gefunden');
 
   // --- Online-Formular (öffentlich, die Adresse ist der Zugang) ---
 
@@ -204,6 +196,8 @@ export async function handle(req: Request, env: Env, now = new Date()): Promise<
     const elw = token ? await db.prepare('SELECT id FROM elws WHERE token_hash = ?').bind(await hash(token)).first<{ id: string }>() : null;
     if (!elw) return fail(401, 'ELW nicht angemeldet');
     await db.prepare('UPDATE elws SET last_seen = ? WHERE id = ?').bind(ts, elw.id).run();
+
+    if (path.startsWith('/v1/elws/me/mail')) return handleMail(req, env, elw.id, path, now);
 
     if (req.method === 'POST' && path === '/v1/elws/me/pairings') {
       const parsed = relayPairSchema.safeParse(await body(req));
@@ -313,6 +307,7 @@ export async function cleanup(env: Env, now = new Date()): Promise<void> {
   await env.DB.prepare('DELETE FROM devices WHERE last_seen < ?').bind(before(DEVICE_TTL_MS)).run();
   await env.DB.prepare('UPDATE devices SET elw_id = NULL WHERE elw_id IN (SELECT id FROM elws WHERE last_seen < ?)').bind(before(ELW_TTL_MS)).run();
   await env.DB.prepare('DELETE FROM elws WHERE last_seen < ?').bind(before(ELW_TTL_MS)).run();
+  await mailCleanup(env, now);
 }
 
 /** Fehlerantwort für den Worker (index.ts) */
