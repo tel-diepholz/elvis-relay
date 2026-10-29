@@ -88,9 +88,11 @@ Das Protokoll steht in `src/mailprotocol.ts`, Gegenstück in ELVIS: `packages/sh
 
 ## Statusseite
 
-Der Cron `*/5 * * * *` prüft Datenbank, R2 und den Mailweg Ende zu Ende: Er schickt eine Testmail an
+Der Cron `0 * * * *` prüft stündlich Datenbank, R2 und den Mailweg Ende zu Ende: Er schickt eine Testmail an
 `probe@einsatzleitwagen.app`, die beim nächsten Lauf angekommen sein muss. Fehler aus dem Betrieb (Annahme, Versand)
-der letzten 15 Minuten zählen mit. `GET /v1/status` liefert Gesamtstatus, Komponenten, Tageswerte der letzten 90 Tage und
+der letzten Stunde zählen mit. Die Testmails zählen gegen das tägliche Versandkontingent des Cloudflare-Kontos. Meldet
+Cloudflare das Kontingent als erschöpft, zeigt die Statusseite „Tägliches Versandkontingent erschöpft“, bis zum
+nächsten Tag (UTC) gehen keine Testmails mehr raus, und ELWs bekommen beim Versand 429 mit einer klaren Meldung. `GET /v1/status` liefert Gesamtstatus, Komponenten, Tageswerte der letzten 90 Tage und
 Störungsmeldungen. Die Homepage zeigt das unter `/status` und blendet bei Störungen einen Hinweis ein. Ändert sich der
 Gesamtstatus, geht eine Mail an `STATUS_ALERT_EMAIL` (fällt der Versand selbst aus, kommt sie nicht an).
 

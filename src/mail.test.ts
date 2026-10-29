@@ -246,6 +246,20 @@ describe('Versand', () => {
     sendFails = true;
     now = new Date(now.getTime() + 2 * 3600_000);
     expect((await e.call('POST', '/v1/elws/me/mail/outbox', { body: { to: ['a@example.org'], raw: raw('elw2-diepholz@einsatzleitwagen.app') } })).status).toBe(502);
+
+    // Tageskontingent des Kontos erschöpft: 429 mit verständlicher Meldung, ein späterer Erfolg hebt die Sperre auf
+    sendFails = false;
+    const send = env.SEND!;
+    env.SEND = async () => {
+      throw new Error('account daily sending quota exceeded');
+    };
+    const quota = await e.jsonCall<{ error: string }>('POST', '/v1/elws/me/mail/outbox', { body: { to: ['a@example.org'], raw: raw('elw2-diepholz@einsatzleitwagen.app') } });
+    expect(quota.status).toBe(429);
+    expect(quota.body.error).toMatch(/Tageskontingent/);
+    expect(await env.DB.prepare("SELECT value FROM status_state WHERE key = 'quota_until'").first()).not.toBeNull();
+    env.SEND = send;
+    expect((await e.call('POST', '/v1/elws/me/mail/outbox', { body: { to: ['a@example.org'], raw: raw('elw2-diepholz@einsatzleitwagen.app') } })).status).toBe(200);
+    expect(await env.DB.prepare("SELECT value FROM status_state WHERE key = 'quota_until'").first()).toBeNull();
   });
 });
 
@@ -325,16 +339,65 @@ describe('Statusseite', () => {
     expect(s.uptime.inbound.at(-1)).toEqual({ day: '2026-10-25', ok: 1 });
 
     sendFails = true;
-    now = new Date(now.getTime() + 5 * 60_000);
+    now = new Date(now.getTime() + 3600_000);
     await runStatusChecks(env, now);
     s = await status();
     expect(s.overall).toBe('degraded');
     expect(s.components.find((c) => c.id === 'outbound')).toMatchObject({ status: 'degraded', detail: 'Versand gestört' });
 
-    // Ohne Prüfung seit 15 Minuten: nicht mehr ok
+    // Drei stündliche Fehlschläge hintereinander: Ausfall
+    for (let i = 0; i < 2; i++) {
+      now = new Date(now.getTime() + 3600_000);
+      await runStatusChecks(env, now);
+    }
+    expect((await status()).components.find((c) => c.id === 'outbound')!.status).toBe('outage');
+
+    // Ohne Prüfung seit über einer Stunde: nicht mehr ok
     sendFails = false;
-    now = new Date(now.getTime() + 20 * 60_000);
+    now = new Date(now.getTime() + 90 * 60_000);
     expect((await status()).components.find((c) => c.id === 'api')!.status).toBe('degraded');
+  });
+
+  it('verbucht Testmails, die schon während des Versands ankommen', async () => {
+    // Wie in Produktion: der email()-Handler läuft, bevor send() zurückkommt (beforeEach-SEND stellt synchron zu)
+    await runStatusChecks(env, now);
+    const probe = await env.DB.prepare('SELECT received_at FROM status_probes').first<{ received_at: string | null }>();
+    expect(probe?.received_at).toBe(now.toISOString());
+    now = new Date(now.getTime() + 3600_000);
+    await runStatusChecks(env, now);
+    expect((await status()).components.find((c) => c.id === 'inbound')!.status).toBe('ok');
+  });
+
+  it('meldet ein erschöpftes Tageskontingent und schickt bis zum nächsten Tag keine Testmails', async () => {
+    let quota = true;
+    const send = env.SEND!;
+    env.SEND = async (from, to, raw) => {
+      if (quota) throw new Error('account daily sending quota exceeded');
+      await send(from, to, raw);
+    };
+    await runStatusChecks(env, now);
+    expect((await status()).components.find((c) => c.id === 'outbound')).toMatchObject({ status: 'degraded', detail: 'Tägliches Versandkontingent erschöpft' });
+
+    // Weitere Läufe am selben Tag versuchen es nicht erneut
+    let attempts = 0;
+    env.SEND = async () => {
+      attempts++;
+      throw new Error('account daily sending quota exceeded');
+    };
+    now = new Date(now.getTime() + 3600_000);
+    await runStatusChecks(env, now);
+    expect(attempts).toBe(0);
+    expect((await status()).components.find((c) => c.id === 'outbound')!.detail).toBe('Tägliches Versandkontingent erschöpft');
+
+    // Am nächsten Tag (UTC) wieder
+    quota = false;
+    env.SEND = async (from, to, raw) => {
+      if (quota) throw new Error('account daily sending quota exceeded');
+      await send(from, to, raw);
+    };
+    now = new Date('2026-10-26T00:00:00Z');
+    await runStatusChecks(env, now);
+    expect((await status()).components.find((c) => c.id === 'outbound')!.status).toBe('ok');
   });
 
   it('verwaltet Störungsmeldungen nur mit Token', async () => {
