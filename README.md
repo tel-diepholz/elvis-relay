@@ -10,7 +10,7 @@ Daten der Statusseite.
 App ──HTTPS──▶ Relay (Cloudflare Worker + D1) ◀──Abruf alle 15 s── ELVIS im ELW
 ```
 
-Es läuft unter **`https://elvis-relay.hhansen06.workers.dev`**. Diese Adresse ist in ELVIS und in der App als Vorgabe eingebaut.
+Es läuft unter **`https://relay.einsatzleitwagen.app`**. Diese Adresse ist in ELVIS und in der App als Vorgabe eingebaut.
 
 ## Ablauf
 
@@ -99,10 +99,10 @@ Gesamtstatus, geht eine Mail an `STATUS_ALERT_EMAIL` (fällt der Versand selbst 
 Meldungen pflegen:
 
 ```sh
-curl -X POST https://elvis-relay.hhansen06.workers.dev/v1/status/incidents \
+curl -X POST https://relay.einsatzleitwagen.app/v1/status/incidents \
   -H "authorization: Bearer $STATUS_ADMIN_TOKEN" -H 'content-type: application/json' \
   -d '{"title":"Wartung Mail-Versand","body":"Heute 20–21 Uhr","severity":"degraded","components":["outbound"]}'
-curl -X PATCH https://elvis-relay.hhansen06.workers.dev/v1/status/incidents/1 \
+curl -X PATCH https://relay.einsatzleitwagen.app/v1/status/incidents/1 \
   -H "authorization: Bearer $STATUS_ADMIN_TOKEN" -d '{"resolved":true}'
 ```
 
@@ -144,13 +144,13 @@ npx wrangler secret put STATUS_ADMIN_TOKEN       # langer Zufallswert für Stör
   → `elvis-relay` anlegen.
 - **Email Sending** für die Domain einrichten (DKIM-Einträge übernehmen), außerdem einen DMARC-Eintrag setzen, z. B.
   `_dmarc TXT "v=DMARC1; p=quarantine; rua=mailto:…"`.
-- Die Custom Domain `openpgpkey.einsatzleitwagen.app` (WKD) legt `wrangler deploy` über `routes` selbst an.
+- Die Custom Domains `relay.einsatzleitwagen.app` und `openpgpkey.einsatzleitwagen.app` (WKD) legt `wrangler deploy` über `routes` selbst an.
 - Optional in `wrangler.toml`: `MAIL_APPROVAL = "manual"`, `STATUS_ALERT_EMAIL`.
 
-Der Worker läuft unter der `workers.dev`-Adresse des Kontos (`workers_dev = true` in `wrangler.toml`). Eine eigene
-Domain per `routes` ginge nur, wenn ihre Zone im selben Cloudflare-Konto liegt. Eine Subdomain einer Zone, die
-anderswo verwaltet wird (z. B. bei Hetzner), lässt sich im Free-Tarif nicht an Cloudflare delegieren. Bei einem
-Wechsel der Adresse müssen ELVIS (`app.relayUrl`) und die App (Vorgabe in `app/build.gradle`) angepasst werden.
+Der Worker läuft unter der Custom Domain `relay.einsatzleitwagen.app` (legt `wrangler deploy` über `routes` an).
+Die alte Adresse `https://elvis-relay.hhansen06.workers.dev` bleibt aktiv (`workers_dev = true`), damit ELWs und
+Apps mit der früheren Vorgabe weiter funktionieren. Bei einem Wechsel der Adresse müssen ELVIS (`app.relayUrl`), die
+App (Vorgabe in `app/build.gradle`) und die Homepage (`src/links.ts`) angepasst werden.
 
 ### Automatisch veröffentlichen
 

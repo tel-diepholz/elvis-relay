@@ -2,17 +2,18 @@
 name = "elvis-relay"
 main = "src/index.ts"
 compatibility_date = "2025-09-01"
-# Erreichbar unter https://elvis-relay.<konto>.workers.dev (eine eigene Domain bräuchte die Zone bei Cloudflare)
+# Erreichbar unter https://relay.einsatzleitwagen.app; die alte workers.dev-Adresse bleibt für ältere Installationen an
 workers_dev = true
 
-# WKD (Web Key Directory) der ELW-Postfächer: openpgpkey.einsatzleitwagen.app (Zone im selben Konto)
+# Relay und WKD (Web Key Directory) der ELW-Postfächer als Custom Domains (Zone im selben Konto)
 routes = [
+  { pattern = "relay.einsatzleitwagen.app", custom_domain = true },
   { pattern = "openpgpkey.einsatzleitwagen.app", custom_domain = true },
 ]
 
 [vars]
 MAIL_DOMAIN = "einsatzleitwagen.app"
-RELAY_URL = "https://elvis-relay.hhansen06.workers.dev"
+RELAY_URL = "https://relay.einsatzleitwagen.app"
 # "manual": Postfächer nach der Bestätigung erst nach Freigabe durch den Betreiber aktiv (siehe README)
 MAIL_APPROVAL = ""
 # Betreiber-Adresse für Statusalarme (leer = keine)
