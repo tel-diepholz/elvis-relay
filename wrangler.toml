@@ -34,6 +34,7 @@ bucket_name = "elvis-mail"
 [[send_email]]
 name = "MAILER"
 
-# Stündlich aufräumen (Positionen nach 24 h, verwaiste Geräte nach 90 Tagen, Mail), alle 5 Minuten Statusprüfung
+# Stündlich aufräumen (Positionen nach 24 h, verwaiste Geräte nach 90 Tagen, Mail) und stündlich Statusprüfung
+# (die Testmail zählt gegen das Tageskontingent für den Versand – nicht öfter)
 [triggers]
-crons = ["17 * * * *", "*/5 * * * *"]
+crons = ["17 * * * *", "0 * * * *"]

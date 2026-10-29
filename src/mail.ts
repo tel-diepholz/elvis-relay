@@ -15,7 +15,7 @@ import {
 } from './mailprotocol.js';
 import { addressOf, buildMime, headerValue, type MimeMail } from './mime.js';
 import type { Env } from './relay.js';
-import { PROBE_LOCALPART, recordEvent, recordProbe } from './status.js';
+import { isQuotaError, PROBE_LOCALPART, recordEvent, recordProbe, setQuotaExhausted } from './status.js';
 
 /**
  * Postfach je ELW. Eingehende Mails nimmt Cloudflare Email Routing an und gibt sie an `receiveMail`; das Relay
@@ -504,6 +504,7 @@ export async function handleMail(req: Request, env: Env, elwId: string, path: st
     }
     let count = 0;
     let lastError = '';
+    let quota = false;
     for (const to of recipients) {
       try {
         await env.SEND(address, to, message);
@@ -511,9 +512,15 @@ export async function handleMail(req: Request, env: Env, elwId: string, path: st
       } catch (e) {
         lastError = e instanceof Error ? e.message : String(e);
         console.error('Versand', to, e);
+        if (isQuotaError(e)) {
+          quota = true;
+          break;
+        }
       }
     }
     await recordEvent(env, 'outbound', count === recipients.length, now);
+    if (quota || count) await setQuotaExhausted(env, quota, now);
+    if (quota && !count) return fail(429, 'Das Tageskontingent für den Mailversand des Relays ist erschöpft, Versand erst morgen wieder möglich');
     if (count) await db.prepare('INSERT INTO mail_sent (localpart, recipients, sent_at) VALUES (?, ?, ?)').bind(mailbox.localpart, count, ts).run();
     if (!count) return fail(502, `Versand fehlgeschlagen${lastError ? `: ${lastError}` : ''}`);
     return json(count === recipients.length ? 200 : 207, { sent: count } satisfies MailOutboxResult);

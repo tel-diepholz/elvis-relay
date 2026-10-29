@@ -12,14 +12,18 @@ import { buildMime } from './mime.js';
 import type { Env } from './relay.js';
 
 /**
- * Statusseite (einsatzleitwagen.app/status). Alle 5 Minuten prüft der Cron Datenbank, Speicher und den
+ * Statusseite (einsatzleitwagen.app/status). Stündlich prüft der Cron Datenbank, Speicher und den
  * Mailweg Ende zu Ende: eine Testmail an probe@ muss bis zum nächsten Lauf angekommen sein. Dazu zählen Fehler
- * aus dem echten Betrieb (Annahme, Versand) der letzten 15 Minuten.
+ * aus dem echten Betrieb (Annahme, Versand) der letzten Stunde. Die Testmails zählen gegen das tägliche
+ * Versandkontingent des Cloudflare-Kontos – deshalb nur stündlich, und bei erschöpftem Kontingent gar nicht.
  */
 
 export const PROBE_LOCALPART = 'probe';
-const STALE_MS = 15 * 60_000;
-const EVENT_WINDOW_MS = 15 * 60_000;
+const STALE_MS = 75 * 60_000;
+const EVENT_WINDOW_MS = 60 * 60_000;
+/** Genug Läufe, um drei Fehlschläge hintereinander zu sehen */
+const RECENT_MS = 4 * 3600_000;
+export const QUOTA_DETAIL = 'Tägliches Versandkontingent erschöpft';
 const UPTIME_DAYS = 90;
 const LEVELS: StatusLevel[] = ['ok', 'degraded', 'outage'];
 const worst = (a: StatusLevel, b: StatusLevel) => (LEVELS.indexOf(a) >= LEVELS.indexOf(b) ? a : b);
@@ -31,6 +35,24 @@ export async function recordEvent(env: Env, component: StatusComponentId, ok: bo
   } catch (e) {
     console.error('Statusereignis', e);
   }
+}
+
+/** Cloudflare meldet das erschöpfte Tageskontingent nur im Fehlertext („account daily sending quota exceeded“) */
+export const isQuotaError = (e: unknown) => /sending quota/i.test(e instanceof Error ? e.message : String(e));
+
+/** Kontingent erschöpft: bis zum nächsten Tag (UTC) keine Testmails, ein erfolgreicher Versand hebt das auf */
+export async function setQuotaExhausted(env: Env, exhausted: boolean, now: Date): Promise<void> {
+  if (!exhausted) {
+    await env.DB.prepare("DELETE FROM status_state WHERE key = 'quota_until'").run();
+    return;
+  }
+  const until = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)).toISOString();
+  await env.DB.prepare("INSERT INTO status_state (key, value) VALUES ('quota_until', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").bind(until).run();
+}
+
+async function quotaExhausted(env: Env, now: Date): Promise<boolean> {
+  const r = await env.DB.prepare("SELECT value FROM status_state WHERE key = 'quota_until'").first<{ value: string }>();
+  return !!r && r.value > now.toISOString();
 }
 
 export async function recordProbe(env: Env, id: string | null, now: Date): Promise<void> {
@@ -55,7 +77,7 @@ async function timed(fn: () => Promise<unknown>): Promise<{ ok: boolean; ms: num
   }
 }
 
-/** Fehler aus dem Betrieb: gestört, wenn in 15 Minuten mindestens 3 Fehler und mehr Fehler als Erfolge */
+/** Fehler aus dem Betrieb: gestört, wenn in einer Stunde mindestens 3 Fehler und mehr Fehler als Erfolge */
 async function eventsOk(env: Env, component: StatusComponentId, now: Date): Promise<boolean> {
   const r = await env.DB.prepare('SELECT SUM(ok = 0) AS bad, SUM(ok = 1) AS good FROM status_events WHERE component = ? AND at > ?')
     .bind(component, before(now, EVENT_WINDOW_MS))
@@ -89,18 +111,27 @@ export async function runStatusChecks(env: Env, now = new Date()): Promise<void>
     const arrived = !last || last.received_at !== null;
     const latency = last?.received_at ? new Date(last.received_at).getTime() - new Date(last.sent_at).getTime() : null;
 
-    const id = crypto.randomUUID();
-    const domain = env.MAIL_DOMAIN ?? 'einsatzleitwagen.app';
-    // Vor dem Versand eintragen: Cloudflare stellt oft zu, bevor send() zurückkommt
-    await db.prepare('INSERT INTO status_probes (id, sent_at) VALUES (?, ?)').bind(id, ts).run();
-    const send = await timed(async () => {
-      await env.SEND!(
-        `status@${domain}`,
-        `${PROBE_LOCALPART}@${domain}`,
-        buildMime({ from: `status@${domain}`, to: `${PROBE_LOCALPART}@${domain}`, subject: 'ELVIS Statusprüfung', text: id, headers: { 'X-Elvis-Probe': id }, date: now }),
-      );
-    });
-    if (!send.ok) await db.prepare('DELETE FROM status_probes WHERE id = ?').bind(id).run();
+    let send: { ok: boolean; ms: number | null; error: string };
+    if (await quotaExhausted(env, now)) {
+      send = { ok: false, ms: null, error: QUOTA_DETAIL };
+    } else {
+      const id = crypto.randomUUID();
+      const domain = env.MAIL_DOMAIN ?? 'einsatzleitwagen.app';
+      // Vor dem Versand eintragen: Cloudflare stellt oft zu, bevor send() zurückkommt
+      await db.prepare('INSERT INTO status_probes (id, sent_at) VALUES (?, ?)').bind(id, ts).run();
+      send = await timed(async () => {
+        await env.SEND!(
+          `status@${domain}`,
+          `${PROBE_LOCALPART}@${domain}`,
+          buildMime({ from: `status@${domain}`, to: `${PROBE_LOCALPART}@${domain}`, subject: 'ELVIS Statusprüfung', text: id, headers: { 'X-Elvis-Probe': id }, date: now }),
+        );
+      });
+      if (!send.ok) await db.prepare('DELETE FROM status_probes WHERE id = ?').bind(id).run();
+      if (isQuotaError(send.error)) {
+        await setQuotaExhausted(env, true, now);
+        send.error = QUOTA_DETAIL;
+      }
+    }
 
     const outOk = send.ok && (await eventsOk(env, 'outbound', now));
     const inOk = arrived && (await eventsOk(env, 'inbound', now));
@@ -131,7 +162,7 @@ async function alertOnChange(env: Env, now: Date): Promise<void> {
   const prev = (await env.DB.prepare("SELECT value FROM status_state WHERE key = 'overall'").first<{ value: string }>())?.value ?? 'ok';
   if (prev === report.overall) return;
   await env.DB.prepare("INSERT INTO status_state (key, value) VALUES ('overall', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").bind(report.overall).run();
-  if (!env.STATUS_ALERT_EMAIL || !env.SEND) return;
+  if (!env.STATUS_ALERT_EMAIL || !env.SEND || (await quotaExhausted(env, now))) return;
   const domain = env.MAIL_DOMAIN ?? 'einsatzleitwagen.app';
   const lines = report.components.map((c) => `- ${c.label}: ${c.status}${c.detail ? ` (${c.detail})` : ''}`).join('\n');
   try {
@@ -176,7 +207,7 @@ export async function statusReport(env: Env, now = new Date()): Promise<RelaySta
   const db = env.DB;
   const recent = await db
     .prepare('SELECT component, ok, detail, checked_at FROM status_checks WHERE checked_at > ? ORDER BY checked_at DESC')
-    .bind(before(now, 3600_000))
+    .bind(before(now, RECENT_MS))
     .all<CheckRow>();
   const incidents = (
     await db

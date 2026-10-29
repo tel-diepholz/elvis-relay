@@ -8,8 +8,8 @@ interface Bindings extends Omit<Env, 'SEND'> {
   MAILER?: SendEmail;
 }
 
-/** Statusprüfung alle 5 Minuten, Aufräumen stündlich (siehe wrangler.toml) */
-const STATUS_CRON = '*/5 * * * *';
+/** Statusprüfung und Aufräumen je stündlich, versetzt (siehe wrangler.toml) */
+const STATUS_CRON = '0 * * * *';
 
 const withMailer = (env: Bindings): Env => ({
   ...env,
