@@ -69,7 +69,7 @@ interface ConfirmationRow {
 }
 
 export const mailDomain = (env: Env) => env.MAIL_DOMAIN ?? 'einsatzleitwagen.app';
-const relayUrl = (env: Env) => (env.RELAY_URL ?? 'https://elvis-relay.hhansen06.workers.dev').replace(/\/$/, '');
+const relayUrl = (env: Env) => (env.RELAY_URL ?? 'https://relay.einsatzleitwagen.app').replace(/\/$/, '');
 const addressFor = (env: Env, localpart: string) => `${localpart}@${mailDomain(env)}`;
 const before = (now: Date, ms: number) => new Date(now.getTime() - ms).toISOString();
 const after = (now: Date, ms: number) => new Date(now.getTime() + ms).toISOString();
