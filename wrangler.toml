@@ -18,6 +18,9 @@ RELAY_URL = "https://relay.einsatzleitwagen.app"
 MAIL_APPROVAL = ""
 # Betreiber-Adresse für Statusalarme (leer = keine)
 STATUS_ALERT_EMAIL = ""
+# Kontingent je Backup-Tresor (Vorgabe; je Tresor in backup_vaults überschreibbar)
+BACKUP_MAX_COUNT = "30"
+BACKUP_MAX_BYTES = "2147483648"
 # Secret (nicht hier): npx wrangler secret put STATUS_ADMIN_TOKEN
 
 [[d1_databases]]
@@ -30,6 +33,11 @@ migrations_dir = "migrations"
 [[r2_buckets]]
 binding = "MAIL"
 bucket_name = "elvis-mail"
+
+# Verschlüsselte Backups der ELVIS-Installationen (Tresor je Wiederherstellungsschlüssel)
+[[r2_buckets]]
+binding = "BACKUPS"
+bucket_name = "elvis-backups"
 
 # Versand (Cloudflare Email Sending für einsatzleitwagen.app)
 [[send_email]]

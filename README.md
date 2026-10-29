@@ -86,6 +86,22 @@ den Worker (`email`-Handler), der Versand läuft über Cloudflare Email Sending 
 
 Das Protokoll steht in `src/mailprotocol.ts`, Gegenstück in ELVIS: `packages/shared/src/mailrelay.ts`.
 
+## Backups
+
+Backup-Treiber „einsatzleitwagen.app – Cloud“ in ELVIS (`src/backup.ts`). ELVIS leitet aus dem
+Wiederherstellungsschlüssel des Nutzers per HKDF Tresor-ID, Zugang und AES-Schlüssel ab. Das Relay speichert nur
+den Hash des Zugangs, die verschlüsselten Teile in R2 (`BACKUPS`, je höchstens 16 MiB) und einen verschlüsselten
+Metadaten-Blob. Eine frische Installation braucht zum Wiederherstellen also nur den Schlüssel.
+
+- `PUT /v1/backups/<tresor>`: Tresor öffnen, anlegen nur mit Header `x-elvis-elw: <ELW-Token>`
+- `GET /v1/backups/<tresor>`: Kontingent, belegter Speicher, abgeschlossene Backups (neueste zuerst)
+- `POST …/backups/<uuid>` `{meta}`, `PUT …/backups/<uuid>/parts/<n>`, `POST …/backups/<uuid>/complete` `{parts, size}`
+- `GET …/backups/<uuid>/parts/<n>`, `DELETE …/backups/<uuid>`
+
+Kontingent: `BACKUP_MAX_COUNT` / `BACKUP_MAX_BYTES` (Vorgabe), je Tresor über `max_backups` / `max_bytes` in
+`backup_vaults` (z. B. für ein Abo). Passt ein neues Backup nicht mehr hinein, fallen die ältesten weg. Der stündliche
+Cron löscht Uploads, die nach 24 Stunden nicht abgeschlossen sind, und Tresore ohne Zugriff seit einem Jahr.
+
 ## Statusseite
 
 Der Cron `0 * * * *` prüft stündlich Datenbank, R2 und den Mailweg Ende zu Ende: Er schickt eine Testmail an
@@ -137,6 +153,7 @@ Für E-Mail zusätzlich (Zone `einsatzleitwagen.app` im selben Konto):
 
 ```sh
 npx wrangler r2 bucket create elvis-mail
+npx wrangler r2 bucket create elvis-backups      # Backups der Installationen
 npx wrangler secret put STATUS_ADMIN_TOKEN       # langer Zufallswert für Störungsmeldungen
 ```
 

@@ -18,6 +18,7 @@ import {
 } from './protocol.js';
 import { closedPage, formHeaders, formPage } from './form.js';
 import { base64url, bearer, body, fail, hash, json, newToken, random, sameCode } from './http.js';
+import { backupCleanup, handleBackup, type BackupEnv } from './backup.js';
 import { handleConfirm, handleMail, handleWkd, mailCleanup, type Sender } from './mail.js';
 import { PRIVACY_HTML } from './privacy.js';
 import { handleStatus } from './status.js';
@@ -27,9 +28,9 @@ import { handleStatus } from './status.js';
  * eine App mit ID und Code und holt die Positionen ab. Außerdem stellt es Online-Formulare für Personalbögen
  * bereit, die der Browser für den ELW verschlüsselt. Es wird nur gespeichert, was dafür nötig ist:
  * Positionen werden mit der Abholung gelöscht, spätestens nach 24 Stunden; Personalbögen spätestens nach 7 Tagen.
- * Dazu kommt ein Postfach je ELW (mail.ts) und die Statusseite (status.ts).
+ * Dazu kommt ein Postfach je ELW (mail.ts), die Backups der Installationen (backup.ts) und die Statusseite (status.ts).
  */
-export interface Env {
+export interface Env extends BackupEnv {
   DB: D1Database;
   /** Verschlüsselte Mails bis zur Abholung */
   MAIL?: R2Bucket;
@@ -182,6 +183,10 @@ export async function handle(req: Request, env: Env, now = new Date()): Promise<
     return fail(404, 'Nicht gefunden');
   }
 
+  // --- Backups (Zugang über den Wiederherstellungsschlüssel) ---
+
+  if (path.startsWith('/v1/backups/')) return handleBackup(req, env, path, now);
+
   // --- ELW ---
 
   if (req.method === 'POST' && path === '/v1/elws') {
@@ -308,6 +313,7 @@ export async function cleanup(env: Env, now = new Date()): Promise<void> {
   await env.DB.prepare('UPDATE devices SET elw_id = NULL WHERE elw_id IN (SELECT id FROM elws WHERE last_seen < ?)').bind(before(ELW_TTL_MS)).run();
   await env.DB.prepare('DELETE FROM elws WHERE last_seen < ?').bind(before(ELW_TTL_MS)).run();
   await mailCleanup(env, now);
+  await backupCleanup(env, now);
 }
 
 /** Fehlerantwort für den Worker (index.ts) */
