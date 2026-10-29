@@ -150,3 +150,27 @@ export const QUALIFICATION_SUGGESTIONS = [
   'Führerschein CE',
 ];
 export const MAX_SHEET_PERSONS = 60;
+
+// --- Backups (Tresor je Wiederherstellungsschlüssel) ---
+
+/** Kontingent eines Tresors; ältere Backups fallen weg, sobald ein neues nicht mehr hineinpasst */
+export interface BackupQuota {
+  maxBackups: number;
+  maxBytes: number;
+}
+
+export interface BackupEntry {
+  id: string;
+  size: number;
+  parts: number;
+  createdAt: string;
+  /** Von ELVIS verschlüsselt (Fahrzeug, Version), für das Relay nicht lesbar */
+  meta: string;
+}
+
+export interface BackupVaultInfo {
+  quota: BackupQuota;
+  usedBytes: number;
+  /** Abgeschlossene Backups, neueste zuerst */
+  backups: BackupEntry[];
+}
