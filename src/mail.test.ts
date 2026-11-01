@@ -389,6 +389,16 @@ describe('Statusseite', () => {
     expect(attempts).toBe(0);
     expect((await status()).components.find((c) => c.id === 'outbound')!.detail).toBe('Tägliches Versandkontingent erschöpft');
 
+    // Ohne neue Testmail wird der Empfang nicht an einer alten gemessen
+    await env.DB.prepare("INSERT INTO status_probes (id, sent_at) VALUES ('verloren-1234', ?)").bind(now.toISOString()).run();
+    now = new Date(now.getTime() + 3600_000);
+    await runStatusChecks(env, now);
+    expect((await status()).components.find((c) => c.id === 'inbound')).toMatchObject({ status: 'degraded', detail: 'Testmail nicht angekommen' });
+    now = new Date(now.getTime() + 3600_000);
+    await runStatusChecks(env, now);
+    expect((await status()).components.find((c) => c.id === 'inbound')!.status).toBe('ok');
+    expect(attempts).toBe(0);
+
     // Am nächsten Tag (UTC) wieder
     quota = false;
     env.SEND = async (from, to, raw) => {

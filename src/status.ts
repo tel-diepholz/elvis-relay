@@ -108,7 +108,8 @@ export async function runStatusChecks(env: Env, now = new Date()): Promise<void>
   if (env.SEND) {
     // Testmail vom letzten Lauf angekommen?
     const last = await db.prepare('SELECT id, sent_at, received_at FROM status_probes ORDER BY sent_at DESC LIMIT 1').first<{ id: string; sent_at: string; received_at: string | null }>();
-    const arrived = !last || last.received_at !== null;
+    // Nur die Testmail des vorigen Laufs zählt: wurde seitdem keine verschickt (Kontingent, Versandfehler), ist nichts zu prüfen
+    const arrived = !last || last.received_at !== null || last.sent_at < before(now, STALE_MS);
     const latency = last?.received_at ? new Date(last.received_at).getTime() - new Date(last.sent_at).getTime() : null;
 
     let send: { ok: boolean; ms: number | null; error: string };
