@@ -48,6 +48,11 @@ Es läuft unter **`https://relay.einsatzleitwagen.app`**. Diese Adresse ist in E
 | `POST /v1/elws/me/mail/outbox` | ELVIS | Mail senden `{ to, raw (base64) }` |
 | `GET`/`POST /m/confirm/:token` | Admin | Bestätigungslink (erst der POST ändert etwas) |
 | `GET /.well-known/openpgpkey/…` | alle | Web Key Directory der Postfächer |
+| `POST /v1/elws/me/hooks` | ELVIS | Webhook für einen Messenger anlegen bzw. abfragen `{ kind: 'whatsapp' \| 'threema' }` → `{ url, verifyToken }` |
+| `DELETE /v1/elws/me/hooks/:kind` | ELVIS | Webhook löschen (die Adresse gilt dann nicht mehr) |
+| `GET /v1/elws/me/hooks/events?after=<seq>` | ELVIS | gepufferte Aufrufe abholen (höchstens 100 je Abruf) |
+| `GET /h/:hookId` | Meta | Prüfung beim Einrichten (`hub.verify_token` → `hub.challenge`) |
+| `POST /h/:hookId` | Meta, Threema | Webhook-Aufruf puffern (unverändert, samt `X-Hub-Signature-256`) |
 | `GET /v1/status` | alle | Statusseite (einsatzleitwagen.app/status) |
 | `POST /v1/status/incidents`, `PATCH /v1/status/incidents/:id` | Betreiber | Störungsmeldungen (Bearer `STATUS_ADMIN_TOKEN`) |
 
@@ -199,3 +204,16 @@ die Relay-Adresse `http://10.0.2.2:8787` eintragen.
 ## Lizenz
 
 MIT, siehe [LICENSE](LICENSE).
+
+## Webhooks der Messenger
+
+WhatsApp (Cloud API von Meta) und Threema (Gateway) liefern eingehende Nachrichten nur an eine öffentliche
+HTTPS-Adresse. Der ELW hat keine, deshalb nimmt das Relay die Aufrufe an: Je ELW und Messenger gibt es eine Adresse
+`/h/<id>` (128 Bit, zugleich der Zugang). Das Relay speichert den Aufruf **unverändert** samt Signatur-Header und
+antwortet sofort. ELVIS holt die Aufrufe mit einem Cursor ab und prüft die Signatur selbst: bei Meta mit dem
+App-Geheimnis, bei Threema mit dem MAC des API-Secrets. Das Relay kennt keine dieser Schlüssel. Threema-Nachrichten
+bleiben Ende-zu-Ende-verschlüsselt, den privaten Schlüssel hat nur ELVIS.
+
+Grenzen: höchstens 256 KB je Aufruf und 5000 nicht abgeholte Aufrufe je Webhook. Was nach 7 Tagen nicht abgeholt
+ist, löscht das Relay. Meldet sich ein ELW neu an (neuer Zugang), bekommt er neue Adressen, die bei Meta bzw.
+Threema neu eingetragen werden müssen.

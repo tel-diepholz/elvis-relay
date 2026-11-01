@@ -22,13 +22,15 @@ import { backupCleanup, handleBackup, type BackupEnv } from './backup.js';
 import { handleConfirm, handleMail, handleWkd, mailCleanup, type Sender } from './mail.js';
 import { PRIVACY_HTML } from './privacy.js';
 import { handleStatus } from './status.js';
+import { handleHookCall, handleHooks, hookCleanup } from './hooks.js';
 
 /**
  * Cloud-Relay der ELVIS-App. Apps melden sich an und senden ihre Position; ein ELW (ELVIS-Server) koppelt
  * eine App mit ID und Code und holt die Positionen ab. Außerdem stellt es Online-Formulare für Personalbögen
  * bereit, die der Browser für den ELW verschlüsselt. Es wird nur gespeichert, was dafür nötig ist:
  * Positionen werden mit der Abholung gelöscht, spätestens nach 24 Stunden; Personalbögen spätestens nach 7 Tagen.
- * Dazu kommt ein Postfach je ELW (mail.ts), die Backups der Installationen (backup.ts) und die Statusseite (status.ts).
+ * Dazu kommt ein Postfach je ELW (mail.ts), die Backups der Installationen (backup.ts), die Statusseite (status.ts) und
+ * ein Eingang für Webhooks der Messenger (hooks.ts).
  */
 export interface Env extends BackupEnv {
   DB: D1Database;
@@ -107,6 +109,11 @@ export async function handle(req: Request, env: Env, now = new Date()): Promise<
   const confirm = /^\/m\/confirm\/([A-Za-z0-9_-]{43})$/.exec(path);
   if (confirm) return handleConfirm(req, env, confirm[1]!, now);
   if (path.startsWith('/v1/status')) return (await handleStatus(req, env, path, now)) ?? fail(404, 'Nicht gefunden');
+
+  // --- Webhooks der Messenger (öffentlich, die Adresse ist der Zugang) ---
+
+  const hookCall = /^\/h\/([A-Za-z0-9_-]{22})$/.exec(path);
+  if (hookCall) return handleHookCall(req, env, hookCall[1]!, now);
 
   // --- Online-Formular (öffentlich, die Adresse ist der Zugang) ---
 
@@ -203,6 +210,7 @@ export async function handle(req: Request, env: Env, now = new Date()): Promise<
     await db.prepare('UPDATE elws SET last_seen = ? WHERE id = ?').bind(ts, elw.id).run();
 
     if (path.startsWith('/v1/elws/me/mail')) return handleMail(req, env, elw.id, path, now);
+    if (path.startsWith('/v1/elws/me/hooks')) return handleHooks(req, env, elw.id, path, url);
 
     if (req.method === 'POST' && path === '/v1/elws/me/pairings') {
       const parsed = relayPairSchema.safeParse(await body(req));
@@ -314,6 +322,7 @@ export async function cleanup(env: Env, now = new Date()): Promise<void> {
   await env.DB.prepare('DELETE FROM elws WHERE last_seen < ?').bind(before(ELW_TTL_MS)).run();
   await mailCleanup(env, now);
   await backupCleanup(env, now);
+  await hookCleanup(env, now);
 }
 
 /** Fehlerantwort für den Worker (index.ts) */

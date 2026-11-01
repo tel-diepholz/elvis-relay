@@ -174,3 +174,31 @@ export interface BackupVaultInfo {
   /** Abgeschlossene Backups, neueste zuerst */
   backups: BackupEntry[];
 }
+
+// --- Webhooks der Messenger (WhatsApp Cloud API, Threema Gateway) ---
+
+export const HOOK_KINDS = ['whatsapp', 'threema'] as const;
+export type HookKind = (typeof HOOK_KINDS)[number];
+export const relayHookRequestSchema = z.object({ kind: z.enum(HOOK_KINDS) });
+
+/** Webhook eines ELW: diese Adresse (und bei Meta das Prüf-Token) trägt der Betreiber beim Dienst ein */
+export interface RelayHook {
+  kind: HookKind;
+  url: string;
+  verifyToken: string;
+}
+
+/** Gepufferter Aufruf, unverändert; signature = Header X-Hub-Signature-256 (Meta) */
+export interface RelayHookEvent {
+  seq: number;
+  kind: HookKind;
+  contentType: string;
+  signature: string | null;
+  body: string;
+  receivedAt: string;
+}
+
+export interface RelayHookBatch {
+  items: RelayHookEvent[];
+  next: number;
+}
