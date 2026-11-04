@@ -53,6 +53,16 @@ Es läuft unter **`https://relay.einsatzleitwagen.app`**. Diese Adresse ist in E
 | `GET /v1/elws/me/hooks/events?after=<seq>` | ELVIS | gepufferte Aufrufe abholen (höchstens 100 je Abruf) |
 | `GET /h/:hookId` | Meta | Prüfung beim Einrichten (`hub.verify_token` → `hub.challenge`) |
 | `POST /h/:hookId` | Meta, Threema | Webhook-Aufruf puffern (unverändert, samt `X-Hub-Signature-256`) |
+| `GET /v1/regions?parent=<ars>` · `?q=<Name>` · `/v1/regions/<ars>` | alle | Kommunen-Katalog (Land › Kreis › Gemeindeverband › Gemeinde) |
+| `GET`/`PUT`/`DELETE /v1/elws/me/messaging/profile` | ELVIS | Eintrag im Verzeichnis `{ regionArs, vehicle, listed }` (braucht ein aktives Postfach) |
+| `GET /v1/elws/me/messaging/directory?q=&region=` | ELVIS | Verzeichnis durchsuchen (Region als Präfix: `03251` = alles im LK Diepholz) |
+| `GET /v1/elws/me/messaging/directory/:elwId` | ELVIS | ein Eintrag samt öffentlichem Schlüssel |
+| `GET`/`POST /v1/elws/me/messaging/conversations` | ELVIS | Chats auflisten bzw. anfragen `{ to, ciphertext }` |
+| `POST /v1/elws/me/messaging/conversations/:id/accept\|decline\|close` | ELVIS | annehmen, ablehnen (nur die angefragte Seite), beenden |
+| `POST /v1/elws/me/messaging/messages` | ELVIS | Nachricht `{ conversationId, ciphertext, attachmentId? }` (nur angenommene Chats) |
+| `POST /v1/elws/me/messaging/attachments`, `GET …/:id` | ELVIS | verschlüsselten Anhang hochladen bzw. als Empfänger laden (höchstens 25 MB) |
+| `GET /v1/elws/me/messaging/events?after=<seq>` | ELVIS | Ereignisse abholen; alles bis `after` wird gelöscht (samt Anhängen) |
+| `GET /v1/elws/me/messaging/socket` | ELVIS | WebSocket: Anstoß bei neuen Ereignissen (Durable Object je ELW) |
 | `GET /v1/status` | alle | Statusseite (einsatzleitwagen.app/status) |
 | `POST /v1/status/incidents`, `PATCH /v1/status/incidents/:id` | Betreiber | Störungsmeldungen (Bearer `STATUS_ADMIN_TOKEN`) |
 
@@ -127,6 +137,27 @@ curl -X PATCH https://relay.einsatzleitwagen.app/v1/status/incidents/1 \
   -H "authorization: Bearer $STATUS_ADMIN_TOKEN" -d '{"resolved":true}'
 ```
 
+## Cloud Messaging
+
+Fahrzeug-zu-Fahrzeug-Chat zwischen ELVIS-Installationen (`src/messaging.ts`, Protokoll `src/messagingprotocol.ts`).
+Voraussetzung ist ein aktives Postfach: Signatur (Ed25519) und Verschlüsselung (OpenPGP) nutzen dessen Schlüssel.
+
+```
+ELVIS A ──signierte POSTs──▶ Relay (D1: msg_events je Empfänger) ──WebSocket-Anstoß──▶ ELVIS B ──GET events?after──▶ Relay
+```
+
+- **Verzeichnis:** Jede Installation trägt Fahrzeug (Name, Funkrufname, Organisation, Kontaktdaten) und ihre
+  Gebietskörperschaft als Amtlichen Regionalschlüssel ein. Der ist präfix-hierarchisch, so findet die Suche nach einem
+  Kreis auch alle Gemeinden darin. Nicht gelistete Installationen erscheinen nicht in der Suche, können aber anfragen.
+- **Zustellung:** Jedes Ereignis (Anfrage, Statuswechsel, Nachricht) liegt zuerst in D1. Danach stößt das Durable
+  Object `ElwSocket` (`src/socket.ts`, Hibernation API, eines je ELW) die verbundene Installation an. ELVIS holt dann
+  per Cursor ab und quittiert damit. Pushes können sich überholen, darum trägt nur der Cursor die Reihenfolge. Den
+  Keepalive (`ping` → `pong`) beantwortet die Laufzeit, ohne das Objekt zu wecken. Ohne Verbindung kostet es nichts.
+- **Kommunen-Katalog:** `src/regions.json` erzeugt `scripts/build-regions.py` aus dem Gemeindeverzeichnis von Destatis
+  (Auszug „Gemeinden in Deutschland nach Fläche, Bevölkerung und Postleitzahl“, xlsx, jährlich zum 31.12.).
+  © Statistisches Bundesamt (Destatis); Vervielfältigung und Verbreitung mit Quellenangabe gestattet. Aktuell:
+  Gebietsstand 31.12.2024.
+
 ## Datenschutz
 
 - Personalbögen verschlüsselt der Browser mit dem öffentlichen Schlüssel des ELW (RSA-OAEP-256 + AES-256-GCM,
@@ -137,7 +168,11 @@ curl -X PATCH https://relay.einsatzleitwagen.app/v1/status/incidents/1 \
 - Mails speichert das Relay nur für den ELW verschlüsselt und löscht sie mit der Abholung, spätestens nach 30 Tagen.
   Es kennt Adresse und Admin-Kontakt des Postfachs, nicht den privaten Schlüssel. Unverschlüsselt eingehende Mails
   sieht es kurz beim Empfang, unverschlüsselt gesendete beim Versand.
-- Das Relay kennt nur zufällige IDs, keine Namen oder Telefonnummern.
+- Cloud Messaging: Anfragen, Nachrichten und Anhänge sind für die Gegenseite verschlüsselt und signiert. Das Relay sieht
+  nur, wer wann wem schreibt. Es löscht sie mit der Abholung, spätestens nach 14 Tagen. Beendete und abgelehnte Chats
+  löscht es nach 14 Tagen, Verzeichniseinträge ohne aktives Postfach beim nächsten Aufräumen. Den Verzeichniseintrag
+  (Fahrzeug, Kontaktdaten, Gebiet) sehen alle registrierten Installationen.
+- Das Relay kennt sonst nur zufällige IDs, keine Namen oder Telefonnummern.
 - Positionen löscht es mit der Abholung durch den ELW, spätestens nach 24 Stunden (stündlicher Cron).
 - App-IDs ohne Kontakt löscht es nach 90 Tagen, ELW-Zugänge nach einem Jahr.
 - Der Text unter `/datenschutz` steht in `src/privacy.ts`. Vor der Veröffentlichung im Play Store dort den
@@ -159,6 +194,7 @@ Für E-Mail zusätzlich (Zone `einsatzleitwagen.app` im selben Konto):
 ```sh
 npx wrangler r2 bucket create elvis-mail
 npx wrangler r2 bucket create elvis-backups      # Backups der Installationen
+npx wrangler r2 bucket create elvis-messaging    # Anhänge des Cloud Messagings
 npx wrangler secret put STATUS_ADMIN_TOKEN       # langer Zufallswert für Störungsmeldungen
 ```
 

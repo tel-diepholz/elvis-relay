@@ -23,6 +23,9 @@ import { handleConfirm, handleMail, handleWkd, mailCleanup, type Sender } from '
 import { PRIVACY_HTML } from './privacy.js';
 import { handleStatus } from './status.js';
 import { handleHookCall, handleHooks, hookCleanup } from './hooks.js';
+import { handleMessaging, messagingCleanup } from './messaging.js';
+import type { MessagingEvent } from './messagingprotocol.js';
+import { handleRegions } from './regions.js';
 
 /**
  * Cloud-Relay der ELVIS-App. Apps melden sich an und senden ihre Position; ein ELW (ELVIS-Server) koppelt
@@ -30,7 +33,7 @@ import { handleHookCall, handleHooks, hookCleanup } from './hooks.js';
  * bereit, die der Browser für den ELW verschlüsselt. Es wird nur gespeichert, was dafür nötig ist:
  * Positionen werden mit der Abholung gelöscht, spätestens nach 24 Stunden; Personalbögen spätestens nach 7 Tagen.
  * Dazu kommt ein Postfach je ELW (mail.ts), die Backups der Installationen (backup.ts), die Statusseite (status.ts) und
- * ein Eingang für Webhooks der Messenger (hooks.ts).
+ * ein Eingang für Webhooks der Messenger (hooks.ts) und das Cloud Messaging zwischen Installationen (messaging.ts).
  */
 export interface Env extends BackupEnv {
   DB: D1Database;
@@ -48,6 +51,12 @@ export interface Env extends BackupEnv {
   STATUS_ALERT_EMAIL?: string;
   /** Mailversand, von index.ts aus dem send_email-Binding gebaut */
   SEND?: Sender;
+  /** Verschlüsselte Anhänge des Cloud Messagings bis zur Abholung */
+  MESSAGING?: R2Bucket;
+  /** Ereignis sofort an den WebSocket einer Installation (index.ts, Durable Object ElwSocket) */
+  NOTIFY?: (elwId: string, event: MessagingEvent) => Promise<void>;
+  /** WebSocket-Upgrade an das Durable Object der Installation weiterreichen (index.ts) */
+  CONNECT?: (elwId: string, req: Request) => Promise<Response>;
 }
 
 /** Fehlversuche beim Code, danach bekommt die App einen neuen */
@@ -109,6 +118,10 @@ export async function handle(req: Request, env: Env, now = new Date()): Promise<
   const confirm = /^\/m\/confirm\/([A-Za-z0-9_-]{43})$/.exec(path);
   if (confirm) return handleConfirm(req, env, confirm[1]!, now);
   if (path.startsWith('/v1/status')) return (await handleStatus(req, env, path, now)) ?? fail(404, 'Nicht gefunden');
+
+  // --- Kommunen-Katalog fürs Cloud Messaging (öffentlich) ---
+
+  if (path === '/v1/regions' || path.startsWith('/v1/regions/')) return handleRegions(req, path, url);
 
   // --- Webhooks der Messenger (öffentlich, die Adresse ist der Zugang) ---
 
@@ -211,6 +224,7 @@ export async function handle(req: Request, env: Env, now = new Date()): Promise<
 
     if (path.startsWith('/v1/elws/me/mail')) return handleMail(req, env, elw.id, path, now);
     if (path.startsWith('/v1/elws/me/hooks')) return handleHooks(req, env, elw.id, path, url);
+    if (path.startsWith('/v1/elws/me/messaging/')) return handleMessaging(req, env, elw.id, path, url, now);
 
     if (req.method === 'POST' && path === '/v1/elws/me/pairings') {
       const parsed = relayPairSchema.safeParse(await body(req));
@@ -323,6 +337,7 @@ export async function cleanup(env: Env, now = new Date()): Promise<void> {
   await mailCleanup(env, now);
   await backupCleanup(env, now);
   await hookCleanup(env, now);
+  await messagingCleanup(env, now);
 }
 
 /** Fehlerantwort für den Worker (index.ts) */
