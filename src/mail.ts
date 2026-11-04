@@ -142,7 +142,8 @@ async function checkRevocation(armored: string, publicKey: string): Promise<bool
 
 // --- Signierte Abrufe ---
 
-async function verifySignature(req: Request, raw: Uint8Array, mailbox: MailboxRow, db: D1Database, now: Date): Promise<boolean> {
+/** Signierten Aufruf prüfen (Mail-Abruf, Cloud Messaging): Ed25519-Schlüssel des Postfachs, Zeitfenster, Nonce einmalig */
+export async function verifySignature(req: Request, raw: Uint8Array, mailbox: MailboxRow, db: D1Database, now: Date): Promise<boolean> {
   const header = req.headers.get(MAIL_SIGNATURE_HEADER) ?? '';
   const parts = Object.fromEntries(header.split(',').map((p) => p.trim().split('=', 2) as [string, string]));
   const t = Number(parts.t);

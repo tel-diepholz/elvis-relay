@@ -39,6 +39,20 @@ bucket_name = "elvis-mail"
 binding = "BACKUPS"
 bucket_name = "elvis-backups"
 
+# Verschlüsselte Anhänge des Cloud Messagings bis zur Abholung (höchstens 14 Tage)
+[[r2_buckets]]
+binding = "MESSAGING"
+bucket_name = "elvis-messaging"
+
+# WebSocket je ELVIS-Installation fürs Cloud Messaging (Push statt Abruf; Hibernation, schläft ohne Verkehr)
+[[durable_objects.bindings]]
+name = "ELW_SOCKET"
+class_name = "ElwSocket"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ElwSocket"]
+
 # Versand (Cloudflare Email Sending für einsatzleitwagen.app)
 [[send_email]]
 name = "MAILER"

@@ -9,6 +9,7 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "isolatedModules": true,
+    "resolveJsonModule": true,
     "forceConsistentCasingInFileNames": true,
     "noEmit": true,
     "types": ["@cloudflare/workers-types"]
