@@ -1,12 +1,13 @@
 import { StrictMode, useCallback, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { LogOut, UserRound } from 'lucide-react';
+import { LogOut, ShieldCheck, UserRound } from 'lucide-react';
 import { ApiError, api, type Me } from './api';
 import { LoginPage } from './pages/LoginPage';
 import { OverviewPage } from './pages/OverviewPage';
 import { NodePage } from './pages/NodePage';
 import { InvitationPage } from './pages/InvitationPage';
 import { AccountPage, EmailConfirmPage, ResetPasswordPage, VerifyPage } from './pages/AccountPages';
+import { AdminPage } from './pages/AdminPage';
 import { useRoute, Link } from './router';
 import './styles.css';
 
@@ -43,6 +44,11 @@ function App() {
           <img src="/favicon.svg" alt="" /> ELVIS Cloud
         </Link>
         <div className="who">
+          {me.operator && (
+            <Link to="/verwaltung" className="btn btn-sm btn-ghost">
+              <ShieldCheck size={16} /> Verwaltung
+            </Link>
+          )}
           <Link to="/konto" className="btn btn-sm btn-ghost">
             <UserRound size={16} /> {me.name || me.email}
           </Link>
@@ -56,6 +62,8 @@ function App() {
           <NodePage id={decodeURIComponent(nodeMatch[1]!)} me={me} />
         ) : route === '/konto' ? (
           <AccountPage me={me} onMe={setMe} />
+        ) : route === '/verwaltung' && me.operator ? (
+          <AdminPage me={me} />
         ) : (
           <OverviewPage me={me} onMe={setMe} />
         )}
