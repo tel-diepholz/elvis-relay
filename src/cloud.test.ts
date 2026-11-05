@@ -4,7 +4,7 @@ import { base64url, sha256Hex } from './http.js';
 import { MAIL_SIGNATURE_HEADER, mailSignaturePayload } from './mailprotocol.js';
 import type { ElwRegistration } from './protocol.js';
 import { cleanup, handle, type Env } from './relay.js';
-import { fakeD1 } from './testing.js';
+import { fakeD1, fakeR2 } from './testing.js';
 
 let env: Env;
 let now: Date;
@@ -18,7 +18,7 @@ const WEYHE = 'ars:032510047047';
 beforeEach(() => {
   now = new Date('2026-11-05T10:00:00Z');
   mails = [];
-  env = { DB: fakeD1(), MAIL_DOMAIN: 'einsatzleitwagen.app', CLOUD_URL: ORIGIN, SEND: async (_from, to, raw) => void mails.push({ to, raw }) };
+  env = { DB: fakeD1(), LIBRARY: fakeR2(), MAIL_DOMAIN: 'einsatzleitwagen.app', CLOUD_URL: ORIGIN, SEND: async (_from, to, raw) => void mails.push({ to, raw }) };
 });
 
 const decoded = (raw: string) => {
@@ -70,7 +70,7 @@ async function installation() {
   const key = (await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify'])) as CryptoKeyPair;
   const sigPublicKey = base64url(new Uint8Array(await crypto.subtle.exportKey('raw', key.publicKey)));
   async function call<T = unknown>(method: string, path: string, body?: unknown, sign = true) {
-    const raw = body === undefined ? new Uint8Array() : new TextEncoder().encode(JSON.stringify(body));
+    const raw = body instanceof Uint8Array ? body : body === undefined ? new Uint8Array() : new TextEncoder().encode(JSON.stringify(body));
     const headers: Record<string, string> = { authorization: `Bearer ${reg.token}`, 'content-type': 'application/json', 'x-elvis-version': '1.4.0' };
     if (sign) {
       const t = now.getTime();
@@ -80,7 +80,13 @@ async function installation() {
     }
     const res = await handle(new Request(`https://relay.test${path}`, { method, headers, body: raw.byteLength ? (raw as BodyInit) : undefined }), env, now);
     const text = await res.text();
-    return { status: res.status, body: (text ? JSON.parse(text) : null) as T };
+    let parsed: unknown = text;
+    try {
+      parsed = text ? JSON.parse(text) : null;
+    } catch {
+      /* Dateiinhalt */
+    }
+    return { status: res.status, body: parsed as T };
   }
   return { elwId: reg.elwId, sigPublicKey, call };
 }
@@ -257,14 +263,14 @@ describe('Stammdaten', () => {
 
     const weyhePull = await elwWeyhe.call<Pull>('GET', '/v1/elws/me/cloud/sync?after=0');
     expect(weyhePull.body.nodeId).toBe(WEYHE);
-    expect(weyhePull.body.items.map((i) => [i.kind, i.data?.name, i.nodeName])).toEqual([
+    expect(weyhePull.body.items.filter((i) => i.kind !== 'objectType').map((i) => [i.kind, i.data?.name, i.nodeName])).toEqual([
       ['force', 'ELW 2 Kreis', 'Landkreis Diepholz'],
       ['role', 'Fernmelder Weyhe', 'Weyhe'],
       ['role', 'Einsatzleiter', 'Landkreis Diepholz'],
       ['force', 'HLF 20 Leeste', 'Weyhe'],
     ]);
     const kreisPull = await elwKreis.call<Pull>('GET', '/v1/elws/me/cloud/sync?after=0');
-    expect(kreisPull.body.items.map((i) => i.data?.name)).toEqual(['ELW 2 Kreis', 'Einsatzleiter', 'HLF 20 Leeste']);
+    expect(kreisPull.body.items.filter((i) => i.kind !== 'objectType').map((i) => i.data?.name)).toEqual(['ELW 2 Kreis', 'Einsatzleiter', 'HLF 20 Leeste']);
 
     // Cursor: nur Neues
     expect((await elwWeyhe.call<Pull>('GET', `/v1/elws/me/cloud/sync?after=${weyhePull.body.next}`)).body.items).toEqual([]);
@@ -301,5 +307,92 @@ describe('Stammdaten', () => {
   it('Abruf nur verknüpft und signiert', async () => {
     const elw = await installation();
     expect((await elw.call('GET', '/v1/elws/me/cloud/sync?after=0')).status).toBe(409);
+  });
+});
+
+describe('Objektbibliothek in der Cloud', () => {
+  const WATER = '00000000-0000-4000-8000-000000000001';
+  type Pull = { items: { uid: string; kind: string; deleted: boolean; data: Record<string, unknown> | null }[]; next: number };
+  type Result = { results: { uid: string; status: string; reason?: string }[] };
+
+  async function setup() {
+    const op = await operator();
+    const kreis = await invite(op.cookie, KREIS, 'kbm@lk-diepholz.de', 'admin');
+    const link = async (nodeId: string, name: string) => {
+      const elw = await installation();
+      const p = await elw.call<{ code: string }>('POST', '/v1/elws/me/cloud/link', { name, sigPublicKey: elw.sigPublicKey });
+      await portal('POST', '/v1/cloud/installations', { cookie: kreis.cookie, body: { code: p.body.code, nodeId } });
+      return elw;
+    };
+    return { op, kreis, elwKreis: await link(KREIS, 'ELW Kreis'), elwWeyhe: await link(WEYHE, 'ELW Weyhe') };
+  }
+  const names = async (elw: Awaited<ReturnType<typeof installation>>, kind: string) =>
+    (await elw.call<Pull>('GET', '/v1/elws/me/cloud/sync?after=0')).body.items.filter((i) => i.kind === kind && !i.deleted).map((i) => i.data!.name);
+
+  it('vordefinierte Typen für alle, Sichtbarkeit je Typ', async () => {
+    const { op, kreis, elwKreis, elwWeyhe } = await setup();
+    expect(await names(elwWeyhe, 'objectType')).toEqual(['Wasserentnahmestelle', 'Einsatzobjekt']);
+    // Nur Betreiber pflegen die vordefinierten
+    expect((await portal('PUT', `/v1/cloud/records/${WATER}`, { cookie: kreis.cookie, body: { baseRev: 1, data: { name: 'x', icon: 'Droplet', color: '#000000' } } })).status).toBe(409);
+
+    // Kreis-Hydrant: in Weyhe sichtbar (both)
+    expect((await portal('POST', '/v1/cloud/records', { cookie: kreis.cookie, body: { kind: 'object', nodeId: KREIS, data: { typeUid: WATER, name: 'H Kreisstraße', lat: 52.9, lon: 8.8, props: { dn: 100 } } } })).status).toBe(201);
+    // Weyhe-eigener Typ „Sammelplatz“, nur für Weyhe
+    const t = await elwWeyhe.call<Result>('POST', '/v1/elws/me/cloud/sync', { changes: [{ uid: crypto.randomUUID(), kind: 'objectType', baseRev: 0, data: { name: 'Sammelplatz', icon: 'Users', color: '#16a34a', visibility: 'own' } }] });
+    const typeUid = t.body.results[0]!.uid;
+    const obj = crypto.randomUUID();
+    expect((await elwWeyhe.call<Result>('POST', '/v1/elws/me/cloud/sync', { changes: [{ uid: obj, kind: 'object', baseRev: 0, data: { typeUid, name: 'Turnhalle Leeste', lat: 52.95, lon: 8.85 } }] })).body.results[0]!.status).toBe('ok');
+    expect(await names(elwWeyhe, 'object')).toEqual(['H Kreisstraße', 'Turnhalle Leeste']);
+    expect(await names(elwKreis, 'object')).toEqual(['H Kreisstraße']);
+
+    // Sichtbarkeit nach oben: jetzt sieht der Kreis die Turnhalle
+    const rec = (await portal<{ rev: number; data: Record<string, unknown> }[]>('GET', `/v1/cloud/nodes/${encodeURIComponent(WEYHE)}/records?kind=objectType`, { cookie: kreis.cookie })).body.find((r) => r.data.name === 'Sammelplatz')!;
+    expect((await portal('PUT', `/v1/cloud/records/${typeUid}`, { cookie: kreis.cookie, body: { baseRev: rec.rev, data: { ...rec.data, visibility: 'up' } } })).status).toBe(200);
+    expect(await names(elwKreis, 'object')).toEqual(['H Kreisstraße', 'Turnhalle Leeste']);
+
+    // Objekt mit unbekanntem Typ geht nicht
+    expect((await elwWeyhe.call<Result>('POST', '/v1/elws/me/cloud/sync', { changes: [{ uid: crypto.randomUUID(), kind: 'object', baseRev: 0, data: { typeUid: crypto.randomUUID(), name: 'x', lat: 1, lon: 1 } }] })).body.results[0]!.status).toBe('invalid');
+    void op;
+  });
+
+  it('Dateien: erst hochladen, dann der Datensatz; sichtbar wie das Objekt; mit dem Objekt gelöscht', async () => {
+    const { kreis, elwKreis, elwWeyhe } = await setup();
+    const obj = crypto.randomUUID();
+    await elwWeyhe.call('POST', '/v1/elws/me/cloud/sync', { changes: [{ uid: obj, kind: 'object', baseRev: 0, data: { typeUid: '00000000-0000-4000-8000-000000000002', name: 'Klinikum', lat: 52.95, lon: 8.85 } }] });
+    const fileUid = crypto.randomUUID();
+    const bytes = new TextEncoder().encode('%PDF-1.4 Feuerwehrplan');
+    const meta = (sha256: string) => ({ objectUid: obj, filename: 'Feuerwehrplan.pdf', mimeType: 'application/pdf', sizeBytes: bytes.byteLength, sha256 });
+    // ohne Datei kein Datensatz
+    expect((await elwWeyhe.call<Result>('POST', '/v1/elws/me/cloud/sync', { changes: [{ uid: fileUid, kind: 'objectFile', baseRev: 0, data: meta('0'.repeat(64)) }] })).body.results[0]!.status).toBe('invalid');
+    const up = await elwWeyhe.call<{ sha256: string }>('PUT', `/v1/elws/me/cloud/files/${fileUid}`, bytes);
+    expect(up.status).toBe(201);
+    expect((await elwWeyhe.call<Result>('POST', '/v1/elws/me/cloud/sync', { changes: [{ uid: fileUid, kind: 'objectFile', baseRev: 0, data: meta(up.body.sha256) }] })).body.results[0]!.status).toBe('ok');
+
+    // Kreis-ELW (Einsatzobjekte: both) holt die Datei, das Portal auch
+    expect((await elwKreis.call<string>('GET', `/v1/elws/me/cloud/files/${fileUid}`)).body).toBe('%PDF-1.4 Feuerwehrplan');
+    const res = await handle(new Request(`${ORIGIN}/v1/cloud/files/${fileUid}`, { headers: { cookie: kreis.cookie } }), env, now);
+    expect(res.headers.get('content-type')).toBe('application/pdf');
+    expect(await res.text()).toBe('%PDF-1.4 Feuerwehrplan');
+
+    // Objekt löschen: Datei als Tombstone, Inhalt weg
+    const before = (await elwKreis.call<Pull>('GET', '/v1/elws/me/cloud/sync?after=0')).body.next;
+    await elwWeyhe.call('POST', '/v1/elws/me/cloud/sync', { changes: [{ uid: obj, kind: 'object', baseRev: 1, deleted: true }] });
+    const after = (await elwKreis.call<Pull>('GET', `/v1/elws/me/cloud/sync?after=${before}`)).body.items;
+    expect(after.map((i) => [i.kind, i.deleted])).toEqual([
+      ['object', true],
+      ['objectFile', true],
+    ]);
+    expect((await elwKreis.call('GET', `/v1/elws/me/cloud/files/${fileUid}`)).status).toBe(404);
+  });
+
+  it('Import vieler Objekte im Portal', async () => {
+    const { kreis } = await setup();
+    const items = [
+      { typeUid: WATER, name: 'H 1', lat: 52.6, lon: 8.37, props: { dn: 100 } },
+      { typeUid: WATER, name: '', lat: 52.6, lon: 8.37 },
+      { typeUid: WATER, name: 'H 3', lat: 52.61, lon: 8.38 },
+    ];
+    const r = await portal<{ created: number; errors: { index: number }[] }>('POST', '/v1/cloud/records/batch', { cookie: kreis.cookie, body: { kind: 'object', nodeId: KREIS, items } });
+    expect(r.body).toMatchObject({ created: 2, errors: [{ index: 1 }] });
   });
 });

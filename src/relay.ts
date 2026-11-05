@@ -63,6 +63,8 @@ export interface Env extends BackupEnv {
   CLOUD_URL?: string;
   /** "1" nur lokal mit wrangler dev: Anmeldecodes und Einladungen ins Log statt per Mail, Origin nicht prüfen */
   CLOUD_DEV?: string;
+  /** Dateien der Objektbibliothek (lib/<uid>) */
+  LIBRARY?: R2Bucket;
   /** Gebaute Portal-Oberfläche (Workers Static Assets, portal/dist) */
   ASSETS?: Fetcher;
 }
