@@ -5,6 +5,14 @@ import { FileText, Library, Lock, Paperclip, Pencil, Plus, Trash2, Upload, X } f
 import { api, type PortalRecord, type RecordDataMap } from '../api';
 import type { ObjectVisibility } from '../../../src/syncprotocol';
 
+/**
+ * Kacheln von OpenStreetMap. Die Seite sendet sonst keinen Referer (_headers: no-referrer); OSM sperrt Kachelabrufe
+ * aus dem Browser ohne Referer („Access blocked“, Tile Usage Policy). Darum schicken nur die Kacheln den Origin mit.
+ */
+const OsmTiles = () => (
+  <TileLayer url="https://tile.openstreetmap.org/{z}/{x}/{y}.png" attribution="© OpenStreetMap-Mitwirkende" maxZoom={19} referrerPolicy="strict-origin-when-cross-origin" />
+);
+
 type TypeRec = PortalRecord & { data: RecordDataMap['objectType'] };
 type ObjRec = PortalRecord & { data: RecordDataMap['object'] };
 type FileRec = PortalRecord & { data: RecordDataMap['objectFile'] };
@@ -187,7 +195,7 @@ function ObjectForm({ type, initial, files, canEdit, onSubmit, onCancel, onUploa
         </div>
         <div className="mini-map">
           <MapContainer center={pos ? [pos.lat, pos.lon] : [52.8, 8.6]} zoom={pos ? 16 : 9} style={{ height: '100%' }}>
-            <TileLayer url="https://tile.openstreetmap.org/{z}/{x}/{y}.png" attribution="© OpenStreetMap-Mitwirkende" maxZoom={19} />
+            <OsmTiles />
             <MapControl points={[]} onPick={canEdit ? (lat, lon) => setPos({ lat, lon }) : undefined} />
             {pos && <CircleMarker center={[pos.lat, pos.lon]} radius={9} pathOptions={{ color: '#fff', weight: 2, fillColor: type.data.color, fillOpacity: 1 }} />}
           </MapContainer>
@@ -401,7 +409,7 @@ export function LibrarySection({ nodeId, canEdit }: { nodeId: string; canEdit: b
           </div>
           <div className="lib-map">
             <MapContainer center={[52.8, 8.6]} zoom={9} preferCanvas style={{ height: '100%' }}>
-              <TileLayer url="https://tile.openstreetmap.org/{z}/{x}/{y}.png" attribution="© OpenStreetMap-Mitwirkende" maxZoom={19} />
+              <OsmTiles />
               <MapControl points={points} />
               {shown.map((o) => (
                 <CircleMarker key={o.uid} center={[o.data.lat, o.data.lon]} radius={6} pathOptions={{ color: '#fff', weight: 2, fillColor: type.data.color, fillOpacity: o.position === 'here' ? 1 : 0.55 }} eventHandlers={{ click: () => setEditing(o) }}>
