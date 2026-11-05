@@ -26,6 +26,7 @@ export function fakeR2(): R2Bucket & { objects: Map<string, Uint8Array> } {
       const v = objects.get(key);
       return v ? { body: new Response(v as BodyInit).body, text: async () => new TextDecoder().decode(v) } : null;
     },
+    head: async (key: string) => (objects.has(key) ? { size: objects.get(key)!.byteLength } : null),
     delete: async (keys: string | string[]) => {
       for (const k of Array.isArray(keys) ? keys : [keys]) objects.delete(k);
     },

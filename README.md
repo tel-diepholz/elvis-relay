@@ -216,6 +216,20 @@ Knoten und hat eine Revision. `seq` ist der Änderungszähler, Gelöschtes bleib
 | `POST /v1/cloud/records`, `PUT`/`DELETE /v1/cloud/records/:uid` | Portal | anlegen, ändern (`baseRev`), löschen (`?rev=`) |
 | `GET /v1/elws/me/cloud/sync?after=<seq>` | ELVIS | Änderungen abholen (höchstens 500, `more`) |
 | `POST /v1/elws/me/cloud/sync` | ELVIS | eigene Änderungen `{ changes: [{ uid, kind, baseRev, data, deleted }] }` → je `ok`/`conflict`/`invalid` |
+| `POST /v1/cloud/records/batch` | Portal | viele auf einmal anlegen (CSV-Import, höchstens 500) |
+| `PUT`/`GET /v1/elws/me/cloud/files/:uid` | ELVIS | Datei der Objektbibliothek hochladen (vor dem Datensatz) bzw. abholen |
+| `PUT /v1/cloud/files/:uid?object=`, `GET /v1/cloud/files/:uid` | Portal | dasselbe im Portal |
+
+**Objektbibliothek:**
+- **Arten:** `objectType`, `object` und `objectFile`.
+- **Sichtbarkeit:** Sie hängt am Typ (`visibility`: `both`, `down`, `up`, `own`). Objekte und Dateien tragen sie in
+  der Spalte `scope` und bekommen bei einer Änderung eine neue `seq`. Typen selbst sieht jeder Knoten darüber und
+  darunter.
+- **Vordefinierte Typen:** Wasserentnahmestelle und Einsatzobjekt liegen mit fester uid an der Wurzel. Pflegen dürfen
+  sie nur Betreiber.
+- **Dateien:** Sie liegen in R2 `elvis-library` (`lib/<uid>`), höchstens 50 MB. Sie sind unveränderlich, der
+  Datensatz verlangt die vorher hochgeladene Datei mit gleicher Größe. Gelöschte Objekte nehmen ihre Dateien mit.
+  Uploads ohne Datensatz räumt der stündliche Cron nach einem Tag weg.
 
 ## Datenschutz
 
@@ -256,6 +270,7 @@ Für E-Mail zusätzlich (Zone `einsatzleitwagen.app` im selben Konto):
 npx wrangler r2 bucket create elvis-mail
 npx wrangler r2 bucket create elvis-backups      # Backups der Installationen
 npx wrangler r2 bucket create elvis-messaging    # Anhänge des Cloud Messagings
+npx wrangler r2 bucket create elvis-library      # Dateien der Objektbibliothek (Cloud-Zugang)
 npx wrangler secret put STATUS_ADMIN_TOKEN       # langer Zufallswert für Störungsmeldungen
 ```
 
