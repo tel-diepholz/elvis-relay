@@ -26,6 +26,8 @@ import { handleHookCall, handleHooks, hookCleanup } from './hooks.js';
 import { handleMessaging, messagingCleanup } from './messaging.js';
 import type { MessagingEvent } from './messagingprotocol.js';
 import { handleRegions } from './regions.js';
+import { handleElwCloud } from './cloud/elw.js';
+import { cloudCleanup, cloudUrl, handlePortal } from './cloud/portal.js';
 
 /**
  * Cloud-Relay der ELVIS-App. Apps melden sich an und senden ihre Position; ein ELW (ELVIS-Server) koppelt
@@ -57,6 +59,12 @@ export interface Env extends BackupEnv {
   NOTIFY?: (elwId: string, event: MessagingEvent) => Promise<void>;
   /** WebSocket-Upgrade an das Durable Object der Installation weiterreichen (index.ts) */
   CONNECT?: (elwId: string, req: Request) => Promise<Response>;
+  /** Adresse des Portals (Cloud-Zugang), Vorgabe https://cloud.einsatzleitwagen.app */
+  CLOUD_URL?: string;
+  /** "1" nur lokal mit wrangler dev: Anmeldecodes und Einladungen ins Log statt per Mail, Origin nicht prüfen */
+  CLOUD_DEV?: string;
+  /** Gebaute Portal-Oberfläche (Workers Static Assets, portal/dist) */
+  ASSETS?: Fetcher;
 }
 
 /** Fehlversuche beim Code, danach bekommt die App einen neuen */
@@ -106,9 +114,14 @@ export async function handle(req: Request, env: Env, now = new Date()): Promise<
   if (req.method === 'OPTIONS') {
     return new Response(null, {
       status: 204,
-      headers: { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET, POST, PUT, PATCH, DELETE', 'access-control-allow-headers': 'authorization, content-type, x-elvis-signature' },
+      headers: { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET, POST, PUT, PATCH, DELETE', 'access-control-allow-headers': 'authorization, content-type, x-elvis-signature, x-elvis-version' },
     });
   }
+  // --- Portal (Cloud-Zugang): Oberfläche unter der eigenen Adresse, API unter /v1/cloud ---
+
+  if (env.ASSETS && url.hostname === new URL(cloudUrl(env)).hostname && !path.startsWith('/v1/')) return env.ASSETS.fetch(req);
+  if (path === '/v1/cloud' || path.startsWith('/v1/cloud/')) return handlePortal(req, env, path, url, now);
+
   if (req.method === 'GET' && path === '/') return new Response('ELVIS App-Relay\n', { headers: { 'content-type': 'text/plain; charset=utf-8' } });
   if (req.method === 'GET' && path === '/datenschutz') return new Response(PRIVACY_HTML, { headers: { 'content-type': 'text/html; charset=utf-8' } });
 
@@ -223,6 +236,7 @@ export async function handle(req: Request, env: Env, now = new Date()): Promise<
     await db.prepare('UPDATE elws SET last_seen = ? WHERE id = ?').bind(ts, elw.id).run();
 
     if (path.startsWith('/v1/elws/me/mail')) return handleMail(req, env, elw.id, path, now);
+    if (path === '/v1/elws/me/cloud' || path.startsWith('/v1/elws/me/cloud/')) return handleElwCloud(req, env, elw.id, path, now);
     if (path.startsWith('/v1/elws/me/hooks')) return handleHooks(req, env, elw.id, path, url);
     if (path.startsWith('/v1/elws/me/messaging/')) return handleMessaging(req, env, elw.id, path, url, now);
 
@@ -338,6 +352,7 @@ export async function cleanup(env: Env, now = new Date()): Promise<void> {
   await backupCleanup(env, now);
   await hookCleanup(env, now);
   await messagingCleanup(env, now);
+  await cloudCleanup(env, now);
 }
 
 /** Fehlerantwort für den Worker (index.ts) */

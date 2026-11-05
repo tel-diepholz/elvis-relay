@@ -158,6 +158,45 @@ ELVIS A ──signierte POSTs──▶ Relay (D1: msg_events je Empfänger) ─�
   © Statistisches Bundesamt (Destatis); Vervielfältigung und Verbreitung mit Quellenangabe gestattet. Aktuell:
   Gebietsstand 31.12.2024.
 
+## Cloud-Zugang (Portal)
+
+Portal für die gemeinsame Datenpflege unter **`https://cloud.einsatzleitwagen.app`**: Konten, Baustruktur, Einladungen
+und der Zustand der Cloud-Module verknüpfter ELVIS-Installationen. Die Oberfläche (`portal/`, Vite + React) liefert
+derselbe Worker als Static Assets aus (`[assets]` in `wrangler.toml`, nur unter der Portal-Adresse), die API liegt
+unter `/v1/cloud` (`src/cloud/portal.ts`), Protokoll in `src/cloudprotocol.ts`.
+
+- **Anmelden:** per Code an die E-Mail-Adresse (6 Ziffern, 15 Minuten, 5 Versuche, 5 Codes je Stunde), beim ersten Mal
+  entsteht das Konto. Es gibt keine Passwörter. Die Sitzung ist ein Cookie `elvis_cloud` (HttpOnly, Secure,
+  SameSite=Strict, 30 Tage). Ändernde Aufrufe verlangen JSON und, wenn der Browser sie schickt, die eigene Origin.
+- **Baustruktur:** Gebietskörperschaften nach dem Amtlichen Regionalschlüssel (Knoten `ars:<ARS>`, aus dem
+  Kommunen-Katalog, entstehen bei Bedarf), darunter frei angelegte Knoten (z. B. Ortsfeuerwehr). Rollen *Lesen*,
+  *Pflegen* und *Verwalten* gelten für den Knoten und alles darunter: Wer den Landkreis verwaltet, verwaltet auch jede
+  Gemeinde darin.
+- **Erster Verwalter:** Konten mit `operator = 1` sind überall Verwalter und setzen die ersten Verwalter eines
+  Landkreises oder einer Gemeinde per Einladung ein. Betreiber von Hand festlegen (das Konto muss sich einmal angemeldet
+  haben):
+  `npx wrangler d1 execute elvis-relay --remote --command "UPDATE accounts SET operator = 1 WHERE email = '…'"`.
+- **Einladungen** gehen per Mail mit Link `/einladung/<token>` (14 Tage gültig) und gelten nur für die eingeladene
+  Adresse.
+- **Installation verknüpfen:** ELVIS (*Einstellungen → Cloud-Zugang*) fordert einen Code an (8 Zeichen, eine Stunde),
+  ein Verwalter gibt ihn auf der Seite des Knotens ein (höchstens 10 falsche Codes je Stunde und Konto). Aufrufe von
+  ELVIS unter `/v1/elws/me/cloud` sind wie der Mail-Abruf signiert, aber mit einem eigenen Ed25519-Schlüssel der
+  Verknüpfung, ein Postfach ist nicht nötig.
+- **Status** je Installation aus dem, was das Relay ohnehin speichert: letzter Kontakt, Postfach (wartende Mails, Größe,
+  älteste, letzter Abruf, heute gesendet), Cloud Messaging (wartende Ereignisse, Chats, Verzeichnis), App-Anbindung,
+  Webhooks, Backup. Inhalte sieht das Portal nicht.
+
+| Endpunkt | Wer | Zweck |
+| --- | --- | --- |
+| `POST /v1/cloud/login`, `POST …/login/verify`, `POST …/logout`, `GET`/`PATCH /v1/cloud/me` | Portal | Anmelden, Konto |
+| `GET`/`PATCH`/`DELETE /v1/cloud/nodes/:id`, `POST /v1/cloud/nodes` | Portal | Knoten ansehen, freie Knoten anlegen, umbenennen, löschen |
+| `PUT`/`DELETE /v1/cloud/nodes/:id/members/:accountId` | Verwalter | Rolle ändern, entfernen |
+| `POST /v1/cloud/invitations`, `DELETE …/:id`, `GET …/token/:token`, `POST …/token/:token/accept` | Portal | Einladungen |
+| `GET`/`POST /v1/cloud/installations`, `GET`/`PUT`/`DELETE …/:elwId` | Portal | Installationen und Status, verknüpfen, verschieben, trennen |
+| `POST /v1/elws/me/cloud/link`, `GET`/`DELETE /v1/elws/me/cloud` | ELVIS | Code anfordern, Stand abfragen, trennen |
+
+Gegenstück in ELVIS: `packages/shared/src/cloudrelay.ts`.
+
 ## Datenschutz
 
 - Personalbögen verschlüsselt der Browser mit dem öffentlichen Schlüssel des ELW (RSA-OAEP-256 + AES-256-GCM,
@@ -172,6 +211,8 @@ ELVIS A ──signierte POSTs──▶ Relay (D1: msg_events je Empfänger) ─�
   nur, wer wann wem schreibt. Es löscht sie mit der Abholung, spätestens nach 14 Tagen. Beendete und abgelehnte Chats
   löscht es nach 14 Tagen, Verzeichniseinträge ohne aktives Postfach beim nächsten Aufräumen. Den Verzeichniseintrag
   (Fahrzeug, Kontaktdaten, Gebiet) sehen alle registrierten Installationen.
+- Cloud-Zugang: Das Relay speichert E-Mail-Adresse und Namen der Konten, Rollen, Einladungen und Namen der verknüpften
+  Installationen. Anmeldecodes und Sitzungen nur als Hash, Codes 15 Minuten, Sitzungen 30 Tage.
 - Das Relay kennt sonst nur zufällige IDs, keine Namen oder Telefonnummern.
 - Positionen löscht es mit der Abholung durch den ELW, spätestens nach 24 Stunden (stündlicher Cron).
 - App-IDs ohne Kontakt löscht es nach 90 Tagen, ELW-Zugänge nach einem Jahr.
@@ -202,7 +243,9 @@ npx wrangler secret put STATUS_ADMIN_TOKEN       # langer Zufallswert für Stör
   → `elvis-relay` anlegen.
 - **Email Sending** für die Domain einrichten (DKIM-Einträge übernehmen), außerdem einen DMARC-Eintrag setzen, z. B.
   `_dmarc TXT "v=DMARC1; p=quarantine; rua=mailto:…"`.
-- Die Custom Domains `relay.einsatzleitwagen.app` und `openpgpkey.einsatzleitwagen.app` (WKD) legt `wrangler deploy` über `routes` selbst an.
+- Die Custom Domains `relay.einsatzleitwagen.app`, `openpgpkey.einsatzleitwagen.app` (WKD) und
+  `cloud.einsatzleitwagen.app` (Portal) legt `wrangler deploy` über `routes` selbst an. `npm run deploy` baut vorher
+  das Portal (`portal/dist`).
 - Optional in `wrangler.toml`: `MAIL_APPROVAL = "manual"`, `STATUS_ALERT_EMAIL`.
 
 Der Worker läuft unter der Custom Domain `relay.einsatzleitwagen.app` (legt `wrangler deploy` über `routes` an).
@@ -233,6 +276,17 @@ Mails als `.eml`-Datei (Pfad steht im Log), Eingang lässt sich mit
 `curl -X POST 'localhost:8787/cdn-cgi/handler/email?from=a@example.org&to=<name>@einsatzleitwagen.app' --data-binary @mail.eml`
 simulieren und die Statusprüfung mit `wrangler dev --test-scheduled` und `curl 'localhost:8787/__scheduled?cron=*/5+*+*+*+*'`.
 Die Testmail an `probe@` kommt lokal nicht an, die Statusseite zeigt den Empfang deshalb als eingeschränkt.
+
+**Portal lokal:** `npm run build:portal`, dann
+
+```sh
+npx wrangler dev --port 8787 --local-upstream localhost:8787 --var CLOUD_URL:http://localhost:8787 --var CLOUD_DEV:1
+```
+
+und `http://localhost:8787` öffnen. `CLOUD_DEV` schreibt Anmeldecodes und Einladungen ins Log statt sie zu mailen und
+prüft die Origin nicht (`wrangler dev` schreibt den Kopf um). Nur lokal setzen! Zum Arbeiten an der Oberfläche
+`npm --prefix portal run dev` (http://localhost:5174, leitet `/v1` an :8787 weiter). ELVIS dazu mit
+`ELVIS_APP_RELAY_URL=http://localhost:8787 ELVIS_CLOUD_URL=http://localhost:8787` starten.
 
 Den Link in Bestätigungsmails baut das Relay aus `RELAY_URL`, lokal also `--var RELAY_URL:http://localhost:8787`. In der App im Android-Emulator
 die Relay-Adresse `http://10.0.2.2:8787` eintragen.
