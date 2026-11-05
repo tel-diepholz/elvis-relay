@@ -1,13 +1,19 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import Database from 'better-sqlite3';
 
+/** Grenze von D1 für gebundene Parameter je Abfrage (SQLite selbst erlaubt viel mehr) */
+export const D1_MAX_PARAMS = 100;
+
 /** D1 im Speicher (nur das, was der Worker nutzt) */
 export function fakeD1(): D1Database {
   const db = new Database(':memory:');
   const dir = new URL('../migrations/', import.meta.url);
   for (const f of readdirSync(dir).sort()) db.exec(readFileSync(new URL(f, dir), 'utf8'));
   const prepare = (sql: string, args: unknown[] = []) => ({
-    bind: (...a: unknown[]) => prepare(sql, a),
+    bind: (...a: unknown[]) => {
+      if (a.length > D1_MAX_PARAMS) throw new Error(`D1: too many SQL variables (${a.length} > ${D1_MAX_PARAMS})`);
+      return prepare(sql, a);
+    },
     first: async () => db.prepare(sql).get(...args) ?? null,
     all: async () => ({ results: db.prepare(sql).all(...args) }),
     run: async () => ({ meta: { changes: db.prepare(sql).run(...args).changes } }),

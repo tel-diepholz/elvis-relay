@@ -416,6 +416,20 @@ describe('Stammdaten', () => {
     expect(here.body.map((r) => [r.data.name, r.editable, r.position])).toEqual([['B 2', true, 'here']]);
   });
 
+  it('Installation an „Deutschland“ mit Hunderten Knoten darunter (D1: höchstens 100 Parameter je Abfrage)', async () => {
+    const { elwWeyhe } = await setup();
+    await elwWeyhe.call('POST', '/v1/elws/me/cloud/sync', { changes: [{ uid: crypto.randomUUID(), kind: 'force', baseRev: 0, data: { name: 'HLF 20 Leeste', members: [] } }] });
+    for (let i = 0; i < 250; i++)
+      await env.DB.prepare('INSERT INTO nodes (id, parent_id, ars, name, created_at) VALUES (?, ?, NULL, ?, ?)').bind(`free:test-${i}`, WEYHE, `Ortsfeuerwehr ${i}`, now.toISOString()).run();
+    const op = await operator();
+    const elw = await installation();
+    const p = await elw.call<{ code: string }>('POST', '/v1/elws/me/cloud/link', { name: 'ELW Bund', sigPublicKey: elw.sigPublicKey });
+    expect((await portal('POST', '/v1/cloud/installations', { cookie: op.cookie, body: { code: p.body.code, nodeId: 'ars:' } })).status).toBe(201);
+    const pull = await elw.call<Pull>('GET', '/v1/elws/me/cloud/sync?after=0');
+    expect(pull.status).toBe(200);
+    expect(pull.body.items.filter((i) => i.kind === 'force').map((i) => [i.data?.name, i.nodeName])).toEqual([['HLF 20 Leeste', 'Weyhe']]);
+  });
+
   it('Abruf nur verknüpft und signiert', async () => {
     const elw = await installation();
     expect((await elw.call('GET', '/v1/elws/me/cloud/sync?after=0')).status).toBe(409);

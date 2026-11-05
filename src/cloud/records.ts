@@ -26,10 +26,16 @@ interface RecordRow {
 
 const NEXT_SEQ = '(SELECT COALESCE(MAX(seq), 0) + 1 FROM md_records)';
 
+/**
+ * Liste als ein einziger Parameter (JSON-Array): D1 erlaubt höchstens 100 Parameter je Abfrage, eine Installation am
+ * Landkreis oder an „Deutschland“ sieht aber Hunderte Knoten
+ */
+const IN_LIST = 'IN (SELECT value FROM json_each(?))';
+
 async function nodeNames(db: D1Database, ids: string[]): Promise<Map<string, string>> {
   const unique = [...new Set(ids)];
   if (!unique.length) return new Map();
-  const rows = await db.prepare(`SELECT id, name FROM nodes WHERE id IN (${unique.map(() => '?').join(',')})`).bind(...unique).all<{ id: string; name: string }>();
+  const rows = await db.prepare(`SELECT id, name FROM nodes WHERE id ${IN_LIST}`).bind(JSON.stringify(unique)).all<{ id: string; name: string }>();
   return new Map(rows.results.map((r) => [r.id, r.name]));
 }
 
@@ -57,8 +63,6 @@ export async function scopeOf(db: D1Database, nodeId: string): Promise<{ up: str
 }
 
 const SCOPED: RecordKind[] = ['object', 'objectFile'];
-const inList = (ids: string[]) => (ids.length ? `IN (${ids.map(() => '?').join(',')})` : 'IN (NULL)');
-
 /** Bedingung „sichtbar für den Knoten“ je Art (siehe VISIBLE_BELOW; Objekte und Dateien nach scope ihres Typs) */
 function visibleWhere(scope: { up: string[]; down: string[] }, kinds: readonly RecordKind[] = RECORD_KINDS): { sql: string; args: string[] } {
   const parts: string[] = [];
@@ -66,17 +70,15 @@ function visibleWhere(scope: { up: string[]; down: string[] }, kinds: readonly R
   const scoped = kinds.filter((k) => SCOPED.includes(k));
   if (scoped.length) {
     // up[0] ist der Knoten selbst
-    parts.push(
-      `(kind ${inList(scoped)} AND (node_id = ? OR (scope IN ('down', 'both') AND node_id ${inList(scope.up)}) OR (scope IN ('up', 'both') AND node_id ${inList(scope.down)})))`,
-    );
-    args.push(...scoped, scope.up[0] ?? '', ...scope.up, ...scope.down);
+    parts.push(`(kind ${IN_LIST} AND (node_id = ? OR (scope IN ('down', 'both') AND node_id ${IN_LIST}) OR (scope IN ('up', 'both') AND node_id ${IN_LIST})))`);
+    args.push(JSON.stringify(scoped), scope.up[0] ?? '', JSON.stringify(scope.up), JSON.stringify(scope.down));
   }
   for (const kind of kinds) {
     if (SCOPED.includes(kind)) continue;
     const nodes = VISIBLE_BELOW[kind] ? [...scope.up, ...scope.down] : scope.up;
     if (!nodes.length) continue;
-    parts.push(`(kind = ? AND node_id IN (${nodes.map(() => '?').join(',')}))`);
-    args.push(kind, ...nodes);
+    parts.push(`(kind = ? AND node_id ${IN_LIST})`);
+    args.push(kind, JSON.stringify(nodes));
   }
   return { sql: parts.length ? `(${parts.join(' OR ')})` : '0', args };
 }
