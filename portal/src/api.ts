@@ -1,6 +1,9 @@
 import type { FireboardLibrary } from '../../src/fireboardprotocol';
 import type { AdminAccount, AdminLogEntry, AdminOverview, CloudRole, InstallationStatus, InvitationInfo, Me, NodeDetail } from '../../src/cloudprotocol';
+import type { RegionWithPath } from '../../src/messagingprotocol';
 import type { PortalRecord, RecordDataMap, RecordKind } from '../../src/syncprotocol';
+
+export type { RegionWithPath } from '../../src/messagingprotocol';
 
 export type { PortalRecord, RecordDataMap, RecordKind } from '../../src/syncprotocol';
 
@@ -60,6 +63,8 @@ export const api = {
   adminAction: (id: string, action: 'reset-link' | 'verify' | 'unlock' | 'logout') => request<AdminAccount>('POST', `/v1/cloud/admin/accounts/${id}/${action}`, {}),
   adminMembership: (id: string, nodeId: string, role: CloudRole | null) => request<AdminAccount>('PUT', `/v1/cloud/admin/accounts/${id}/membership`, { nodeId, role }),
   adminDelete: (id: string) => request<null>('DELETE', `/v1/cloud/admin/accounts/${id}`),
+  /** Gebietskörperschaften aus dem ARS-Katalog nach Namen (auch solche ohne Knoten) */
+  regions: (q: string) => request<RegionWithPath[]>('GET', `/v1/regions?q=${encodeURIComponent(q)}`),
 
   node: (id: string) => request<NodeDetail>('GET', node(id)),
   createNode: (parentId: string, name: string) => request<NodeDetail>('POST', '/v1/cloud/nodes', { parentId, name }),
