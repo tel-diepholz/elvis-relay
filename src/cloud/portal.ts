@@ -615,13 +615,20 @@ ELVIS Cloud`,
     if (!(await getNode(db, nodeId))) return fail(404, 'Knoten nicht gefunden');
     if (!(await mayEdit(nodeId))) return fail(403, 'Kein Recht zum Pflegen an diesem Knoten');
     let created = 0;
+    let skipped = 0;
     const errors: { index: number; reason: string }[] = [];
     for (const [index, data] of items.entries()) {
+      // Import mit Herkunft (z. B. fireboard:123): gibt es das Objekt schon irgendwo, nicht noch einmal anlegen
+      const source = kind === 'object' ? (data as { source?: unknown } | null)?.source : null;
+      if (typeof source === 'string' && source && (await db.prepare("SELECT 1 FROM md_records WHERE kind = 'object' AND deleted = 0 AND json_extract(data, '$.source') = ?").bind(source).first())) {
+        skipped++;
+        continue;
+      }
       const res = await writeRecord(db, { uid: crypto.randomUUID(), kind, nodeId, baseRev: 0, deleted: false, data, by, mayWrite: mayEdit, blobs: env.LIBRARY }, now);
       if (res.status === 'ok') created++;
       else errors.push({ index, reason: res.reason });
     }
-    return json(200, { created, errors });
+    return json(200, { created, skipped, errors });
   }
 
   // --- Dateien der Objektbibliothek ---

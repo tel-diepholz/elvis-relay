@@ -138,7 +138,13 @@ export function NodePage({ id, me }: { id: string; me: Me }) {
 
       <RecordsSection nodeId={id} canEdit={node.role === 'editor' || node.role === 'admin'} />
 
-      <LibrarySection nodeId={id} canEdit={node.role === 'editor' || node.role === 'admin'} />
+      <LibrarySection
+        nodeId={id}
+        canEdit={node.role === 'editor' || node.role === 'admin'}
+        me={me}
+        // Gebietskörperschaft für die Lageprüfung beim Import: der Knoten selbst bzw. die nächste darüber
+        ownArs={node.ars ?? [...node.pathIds].reverse().find((p) => p.startsWith('ars:'))?.slice(4) ?? null}
+      />
 
       <section className="card">
         <div className="card-head">

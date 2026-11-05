@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
-import { CircleMarker, MapContainer, TileLayer, Tooltip, useMap, useMapEvents } from 'react-leaflet';
+import { CircleMarker, MapContainer, Polygon, TileLayer, Tooltip, useMap, useMapEvents } from 'react-leaflet';
+import { areaOf } from '../geo';
 import 'leaflet/dist/leaflet.css';
 import { Download, FileText, Library, Lock, Paperclip, Pencil, Plus, Trash2, Upload, X } from 'lucide-react';
 import { FireboardImport } from './FireboardImport';
-import { api, type PortalRecord, type RecordDataMap } from '../api';
+import { api, type Me, type PortalRecord, type RecordDataMap } from '../api';
 import type { ObjectVisibility } from '../../../src/syncprotocol';
 
 /**
@@ -53,6 +54,32 @@ function Labeled({ label, children }: { label: string; children: ReactNode }) {
 }
 
 /** Kartenausschnitt auf die Objekte setzen, Klick setzt die Position (beim Bearbeiten) */
+/**
+ * Grenzen der gewählten Gebietskörperschaft (VG250, vereinfacht): die Gemeinden darin mit dünnen Linien; ohne Objekte
+ * zeigt die Karte das ganze Gebiet. Deutschland als Ganzes wird nicht gezeichnet (zu groß).
+ */
+function AreaOutline({ ars, fit }: { ars: string | null; fit: boolean }) {
+  const map = useMap();
+  const [area, setArea] = useState<Awaited<ReturnType<typeof areaOf>>>([]);
+  useEffect(() => {
+    let alive = true;
+    areaOf(ars ?? '').then((a) => alive && setArea(a), () => alive && setArea([]));
+    return () => void (alive = false);
+  }, [ars]);
+  useEffect(() => {
+    if (!fit || !area.length) return;
+    const pts = area.flatMap((g) => g.rings.flat());
+    if (pts.length) map.fitBounds(pts, { padding: [12, 12] });
+  }, [map, area, fit]);
+  return (
+    <>
+      {area.map((g) => (
+        <Polygon key={g.ars} positions={g.rings} interactive={false} pathOptions={{ color: '#c62828', weight: area.length > 1 ? 1.5 : 2.5, opacity: 0.8, fill: true, fillOpacity: 0.04, dashArray: area.length > 1 ? '4 4' : undefined }} />
+      ))}
+    </>
+  );
+}
+
 function MapControl({ points, onPick }: { points: [number, number][]; onPick?: (lat: number, lon: number) => void }) {
   const map = useMap();
   useEffect(() => {
@@ -150,8 +177,10 @@ function TypeForm({ initial, onSubmit, onCancel }: { initial: RecordDataMap['obj
   );
 }
 
-function ObjectForm({ type, initial, files, canEdit, onSubmit, onCancel, onUpload, onRemoveFile }: {
+function ObjectForm({ type, initial, files, canEdit, ars, onSubmit, onCancel, onUpload, onRemoveFile }: {
   type: TypeRec;
+  /** Gebietskörperschaft des Bereichs (Grenzen auf der Karte) */
+  ars: string | null;
   initial: ObjRec | null;
   files: FileRec[];
   canEdit: boolean;
@@ -197,6 +226,7 @@ function ObjectForm({ type, initial, files, canEdit, onSubmit, onCancel, onUploa
         <div className="mini-map">
           <MapContainer center={pos ? [pos.lat, pos.lon] : [52.8, 8.6]} zoom={pos ? 16 : 9} style={{ height: '100%' }}>
             <OsmTiles />
+            <AreaOutline ars={ars} fit={!pos} />
             <MapControl points={[]} onPick={canEdit ? (lat, lon) => setPos({ lat, lon }) : undefined} />
             {pos && <CircleMarker center={[pos.lat, pos.lon]} radius={9} pathOptions={{ color: '#fff', weight: 2, fillColor: type.data.color, fillOpacity: 1 }} />}
           </MapContainer>
@@ -298,7 +328,7 @@ export function parseCsv(text: string, type: TypeRec): { items: RecordDataMap['o
 }
 
 /** Objektbibliothek eines Bereichs: Typen (mit Sichtbarkeit), Objekte auf der Karte, Dateien, Import */
-export function LibrarySection({ nodeId, canEdit }: { nodeId: string; canEdit: boolean }) {
+export function LibrarySection({ nodeId, canEdit, ownArs, me }: { nodeId: string; canEdit: boolean; ownArs: string | null; me: Me }) {
   const [types, setTypes] = useState<TypeRec[]>([]);
   const [objects, setObjects] = useState<ObjRec[]>([]);
   const [files, setFiles] = useState<FileRec[]>([]);
@@ -384,6 +414,8 @@ export function LibrarySection({ nodeId, canEdit }: { nodeId: string; canEdit: b
       {fireboard && (
         <FireboardImport
           nodeId={nodeId}
+          ownArs={ownArs}
+          me={me}
           types={types}
           objects={objects}
           onClose={() => setFireboard(false)}
@@ -430,6 +462,7 @@ export function LibrarySection({ nodeId, canEdit }: { nodeId: string; canEdit: b
           <div className="lib-map">
             <MapContainer center={[52.8, 8.6]} zoom={9} preferCanvas style={{ height: '100%' }}>
               <OsmTiles />
+              <AreaOutline ars={ownArs} fit={points.length === 0} />
               <MapControl points={points} />
               {shown.map((o) => (
                 <CircleMarker key={o.uid} center={[o.data.lat, o.data.lon]} radius={6} pathOptions={{ color: '#fff', weight: 2, fillColor: type.data.color, fillOpacity: o.position === 'here' ? 1 : 0.55 }} eventHandlers={{ click: () => setEditing(o) }}>
@@ -475,6 +508,7 @@ export function LibrarySection({ nodeId, canEdit }: { nodeId: string; canEdit: b
             <ObjectForm
               key={editing === 'new' ? 'new' : editing.uid}
               type={type}
+              ars={ownArs}
               initial={editing === 'new' ? null : editing}
               files={editing === 'new' ? [] : filesOf(editing)}
               canEdit={canEdit && (editing === 'new' || editing.editable)}

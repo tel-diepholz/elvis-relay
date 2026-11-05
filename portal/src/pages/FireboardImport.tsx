@@ -1,7 +1,9 @@
 import { useMemo, useState, type FormEvent } from 'react';
-import { Download, X } from 'lucide-react';
-import { api, type PortalRecord, type RecordDataMap } from '../api';
-import { fireboardSource, type FireboardCategory, type FireboardLibrary } from '../../../src/fireboardprotocol';
+import { Check, Copy, Download, MapPinned, X } from 'lucide-react';
+import { api, type Me, type PortalRecord, type RecordDataMap } from '../api';
+import { fireboardSource, type FireboardCategory, type FireboardItem, type FireboardLibrary } from '../../../src/fireboardprotocol';
+import { locate, type Place } from '../geo';
+import { NearbyIndex } from '../nearby';
 
 type TypeRec = PortalRecord & { data: RecordDataMap['objectType'] };
 type ObjRec = PortalRecord & { data: RecordDataMap['object'] };
@@ -14,6 +16,40 @@ const BATCH = 50;
 const NEW_TYPE_COLORS = ['#7c3aed', '#0891b2', '#ca8a04', '#db2777', '#16a34a', '#ea580c'];
 
 const label = (c: FireboardCategory) => c.path.join(' › ');
+
+/** Zu importierendes Objekt mit Zielknoten */
+type Entry = { nodeId: string; data: RecordDataMap['object'] };
+
+/** Radius, in dem eine Wasserentnahmestelle gleicher Art als möglicher Doppeleintrag gilt */
+const NEAR_M = 10;
+
+/**
+ * Rückfragen vor dem Import:
+ * - area: Wasserentnahmestelle liegt außerhalb der eigenen Gebietskörperschaft (place null = außerhalb Deutschlands);
+ *   bei „Ja“ geht sie an die Gemeinde, in der sie liegt (nur mit Pflegerecht dort)
+ * - near: im Umkreis von 10 m gibt es schon eine Wasserentnahmestelle gleicher Art (in der Bibliothek oder im Import)
+ */
+type Question =
+  | { kind: 'area'; item: FireboardItem; place: Place | null; allowed: boolean }
+  | { kind: 'near'; item: FireboardItem; other: { name: string; art: string | null; distance: number; inImport: boolean } };
+
+/** Zwischenstand zwischen den Rückfragen */
+interface Pass {
+  /** Fertig entschieden (Nicht-Wasser und Wasser nach allen Prüfungen) */
+  entries: Entry[];
+  /** Wasserentnahmestellen vor der Nachbarschaftsprüfung */
+  water: { item: FireboardItem; entry: Entry }[];
+  created: number;
+  moved: number;
+  skipped: { no: number; noRight: number; outside: number; near: number };
+}
+interface Review {
+  queue: Question[];
+  index: number;
+  /** Mit „Ja“ beantwortet (Fireboard-ID) */
+  yes: Set<number>;
+  pass: Pass;
+}
 const newName = (c: FireboardCategory) => c.path.at(-1)!.slice(0, 60);
 
 /**
@@ -22,13 +58,33 @@ const newName = (c: FireboardCategory) => c.path.at(-1)!.slice(0, 60);
  * (Vorschlag: Hydranten, Brunnen … → Wasserentnahmestelle mit Art und DN, Sonderobjekte → Einsatzobjekt). Schon
  * importierte Objekte (Herkunft fireboard:<id>) werden übersprungen, der Import lässt sich also wiederholen.
  */
-export function FireboardImport({ nodeId, types, objects, onDone, onClose }: { nodeId: string; types: TypeRec[]; objects: ObjRec[]; onDone: (msg: string) => void; onClose: () => void }) {
+export function FireboardImport({
+  nodeId,
+  ownArs,
+  me,
+  types,
+  objects,
+  onDone,
+  onClose,
+}: {
+  nodeId: string;
+  /** Gebietskörperschaft des Bereichs (bei freien Knoten die darüber); '' = Deutschland, null = unbekannt */
+  ownArs: string | null;
+  me: Me;
+  types: TypeRec[];
+  objects: ObjRec[];
+  onDone: (msg: string) => void;
+  onClose: () => void;
+}) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [lib, setLib] = useState<FireboardLibrary | null>(null);
   const [targets, setTargets] = useState<Record<number, Target>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Rückfragen (Lage, Nachbarschaft) mit „Für alle weiteren so verfahren“
+  const [review, setReview] = useState<Review | null>(null);
+  const [forAll, setForAll] = useState(false);
 
   // Vordefinierte Typen (Wasserentnahmestelle, Einsatzobjekt) an ihrem Kennzeichen erkennen
   const waterUid = types.find((t) => t.data.builtin === 'water')?.uid ?? null;
@@ -43,6 +99,9 @@ export function FireboardImport({ nodeId, types, objects, onDone, onClose }: { n
     return same ? { kind: 'type', uid: same.uid } : { kind: 'new', name: newName(c) };
   };
 
+  /** Gewähltes Ziel; ohne eigene Wahl der Vorschlag (aus den aktuell geladenen Typen) */
+  const targetOf = (c: FireboardCategory): Target => targets[c.id] ?? suggest(c);
+
   const fetchLibrary = async (e: FormEvent) => {
     e.preventDefault();
     setError(null);
@@ -50,7 +109,7 @@ export function FireboardImport({ nodeId, types, objects, onDone, onClose }: { n
     try {
       const l = await api.fireboard(nodeId, email, password);
       setLib(l);
-      setTargets(Object.fromEntries(l.categories.map((c) => [c.id, suggest(c)])));
+      setTargets({});
       setPassword('');
     } catch (err) {
       setError((err as Error).message);
@@ -61,6 +120,118 @@ export function FireboardImport({ nodeId, types, objects, onDone, onClose }: { n
 
   const pending = (c: FireboardCategory) => lib!.items.filter((i) => i.categoryId === c.id && !known.has(fireboardSource(i.id)));
 
+  /** Pflegerecht an einer Gemeinde: Betreiber, oder Pflegen/Verwalten an ihr bzw. einer Gebietskörperschaft darüber */
+  const mayEditArs = (ars: string) =>
+    me.operator || me.memberships.some((m) => (m.role === 'editor' || m.role === 'admin') && m.node.id.startsWith('ars:') && ars.startsWith(m.node.id.slice(4)));
+
+  /** Objekte gruppiert nach Zielknoten in Paketen importieren */
+  const importEntries = async (pass: Pass) => {
+    const { entries, skipped } = pass;
+    let done = 0;
+    let failed = 0;
+    let duplicate = 0;
+    const byNode = new Map<string, RecordDataMap['object'][]>();
+    for (const e of entries) byNode.set(e.nodeId, [...(byNode.get(e.nodeId) ?? []), e.data]);
+    let sent = 0;
+    for (const [target, items] of byNode) {
+      for (let k = 0; k < items.length; k += BATCH) {
+        sent += Math.min(BATCH, items.length - k);
+        setBusy(`Importiere ${sent} von ${entries.length} Objekten …`);
+        const r = await api.importRecords(target, 'object', items.slice(k, k + BATCH));
+        done += r.created;
+        failed += r.errors.length;
+        duplicate += r.skipped ?? 0;
+      }
+    }
+    const notes = [
+      pass.created ? `${pass.created} neue Typen` : '',
+      pass.moved ? `${pass.moved} anderen Gebietskörperschaften zugeordnet` : '',
+      duplicate ? `${duplicate} schon vorhanden` : '',
+      skipped.near ? `${skipped.near} mögliche Doppeleinträge nicht importiert` : '',
+      skipped.no ? `${skipped.no} außerhalb nicht importiert` : '',
+      skipped.noRight ? `${skipped.noRight} ohne Pflegerecht am Zielgebiet nicht importiert` : '',
+      skipped.outside ? `${skipped.outside} außerhalb Deutschlands nicht importiert` : '',
+      failed ? `${failed} abgelehnt` : '',
+    ].filter(Boolean);
+    onDone(`${done} Objekte aus Fireboard übernommen${notes.length ? ` (${notes.join(', ')})` : ''}`);
+  };
+
+  /** Gleiche Art: beide ohne Angabe oder gleich; fehlt sie nur bei einem, gilt es als gleich (lieber einmal zu oft fragen) */
+  const sameArt = (a: unknown, b: unknown) => !a || !b || a === b;
+
+  /**
+   * Nachbarschaftsprüfung: Wasserentnahmestellen gleicher Art im Umkreis von 10 m – vorhandene in der Bibliothek (dieser
+   * Bereich und die Zielgebiete) und solche, die im selben Import davor kommen
+   */
+  const checkNearby = async (pass: Pass) => {
+    setBusy('Prüfe auf Wasserentnahmestellen in der Nähe …');
+    type Point = { lat: number; lon: number; name: string; art: string | null; inImport: boolean };
+    const index = new NearbyIndex<Point>();
+    const add = (o: RecordDataMap['object'], inImport: boolean) => index.add({ lat: o.lat, lon: o.lon, name: o.name, art: typeof o.props.art === 'string' ? o.props.art : null, inImport });
+    for (const o of objects) if (o.data.typeUid === waterUid) add(o.data, false);
+    // Zielgebiete anderer Gemeinden: deren Bibliothek kennt dieser Bereich nicht
+    for (const target of new Set(pass.water.map((w) => w.entry.nodeId).filter((n) => n !== nodeId))) {
+      for (const o of await api.records(target, 'object')) if (o.data.typeUid === waterUid) add(o.data, false);
+    }
+    const queue: Question[] = [];
+    for (const w of pass.water) {
+      const art = (w.entry.data.props.art as string | undefined) ?? null;
+      const near = index.nearest(w.entry.data, NEAR_M, (p) => sameArt(p.art, art));
+      if (near) queue.push({ kind: 'near', item: w.item, other: { name: near.hit.name, art: near.hit.art, distance: near.distance, inImport: near.hit.inImport } });
+      add(w.entry.data, true);
+    }
+    const asked = new Set(queue.map((q) => q.item.id));
+    const next: Pass = { ...pass, entries: [...pass.entries, ...pass.water.filter((w) => !asked.has(w.item.id)).map((w) => w.entry)], water: pass.water.filter((w) => asked.has(w.item.id)) };
+    if (queue.length) {
+      setForAll(false);
+      setReview({ queue, index: 0, yes: new Set(), pass: next });
+      return;
+    }
+    await importEntries(next);
+  };
+
+  /** Alle Rückfragen einer Art beantwortet: übernehmen und weiter (Lage → Nachbarschaft → Import) */
+  const finishReview = async (r: Review) => {
+    setReview(null);
+    setError(null);
+    try {
+      const pass: Pass = { ...r.pass, skipped: { ...r.pass.skipped }, water: [...r.pass.water], entries: [...r.pass.entries] };
+      if (r.queue[0]?.kind === 'area') {
+        for (const q of r.queue as Extract<Question, { kind: 'area' }>[]) {
+          const w = pass.water.find((x) => x.item.id === q.item.id)!;
+          pass.water = pass.water.filter((x) => x !== w);
+          if (!r.yes.has(q.item.id)) pass.skipped.no++;
+          else if (!q.place) pass.skipped.outside++;
+          else if (!q.allowed) pass.skipped.noRight++;
+          else (pass.water.push({ item: w.item, entry: { ...w.entry, nodeId: `ars:${q.place.ars}` } }), pass.moved++);
+        }
+        // Für die Lage zurückgehaltene, aber eigene Wasserentnahmestellen stehen schon in pass.water
+        await checkNearby(pass);
+      } else {
+        for (const w of pass.water) {
+          if (r.yes.has(w.item.id)) pass.entries.push(w.entry);
+          else pass.skipped.near++;
+        }
+        pass.water = [];
+        await importEntries(pass);
+      }
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const answer = (yes: boolean) => {
+    if (!review) return;
+    const next = new Set(review.yes);
+    // „Für alle weiteren“: diese und alle folgenden gleich entscheiden
+    const upto = forAll ? review.queue.length : review.index + 1;
+    for (let k = review.index; k < upto; k++) if (yes) next.add(review.queue[k]!.item.id);
+    if (upto >= review.queue.length) void finishReview({ ...review, yes: next });
+    else setReview({ ...review, index: upto, yes: next });
+  };
+
   const run = async () => {
     if (!lib) return;
     setError(null);
@@ -68,7 +239,7 @@ export function FireboardImport({ nodeId, types, objects, onDone, onClose }: { n
       // Neue Typen zuerst (gleicher Name = ein Typ)
       const created = new Map<string, string>();
       for (const c of lib.categories) {
-        const t = targets[c.id];
+        const t = targetOf(c);
         if (t?.kind !== 'new' || created.has(t.name) || !pending(c).length) continue;
         setBusy(`Lege Typ „${t.name}“ an …`);
         const rec = await api.createRecord(nodeId, 'objectType', {
@@ -82,28 +253,37 @@ export function FireboardImport({ nodeId, types, objects, onDone, onClose }: { n
         });
         created.set(t.name, rec.uid);
       }
-      const items: RecordDataMap['object'][] = [];
+      const pass: Pass = { entries: [], water: [], created: created.size, moved: 0, skipped: { no: 0, noRight: 0, outside: 0, near: 0 } };
       for (const c of lib.categories) {
-        const t = targets[c.id];
+        const t = targetOf(c);
         if (!t || t.kind === 'skip') continue;
         const typeUid = t.kind === 'new' ? created.get(t.name)! : t.uid;
-        const water = typeUid === waterUid;
+        const isWater = typeUid === waterUid;
         for (const i of pending(c)) {
           const props: Record<string, string | number> = {};
-          if (water && i.art) props.art = i.art;
-          if (water && i.dn) props.dn = i.dn;
-          items.push({ typeUid, name: i.name, lat: i.lat, lon: i.lon, address: i.address, notes: i.notes, props, source: fireboardSource(i.id), geometry: null });
+          if (isWater && i.art) props.art = i.art;
+          if (isWater && i.dn) props.dn = i.dn;
+          const entry: Entry = { nodeId, data: { typeUid, name: i.name, lat: i.lat, lon: i.lon, address: i.address, notes: i.notes, props, source: fireboardSource(i.id), geometry: null } };
+          if (isWater) pass.water.push({ item: i, entry });
+          else pass.entries.push(entry);
         }
       }
-      let done = 0;
-      let failed = 0;
-      for (let k = 0; k < items.length; k += BATCH) {
-        setBusy(`Importiere ${Math.min(k + BATCH, items.length)} von ${items.length} Objekten …`);
-        const r = await api.importRecords(nodeId, 'object', items.slice(k, k + BATCH));
-        done += r.created;
-        failed += r.errors.length;
+      // Wasserentnahmestellen: liegen sie in der eigenen Gebietskörperschaft? (Deutschland als Bereich: immer)
+      const queue: Question[] = [];
+      if (ownArs) {
+        for (let k = 0; k < pass.water.length; k++) {
+          if (k % 200 === 0) setBusy(`Prüfe Lage der Wasserentnahmestellen … ${k} von ${pass.water.length}`);
+          const { item } = pass.water[k]!;
+          const place = await locate(item.lat, item.lon);
+          if (!place || !place.ars.startsWith(ownArs)) queue.push({ kind: 'area', item, place, allowed: !!place && mayEditArs(place.ars) });
+        }
       }
-      onDone(`${done} Objekte aus Fireboard übernommen${created.size ? `, ${created.size} neue Typen` : ''}${failed ? `, ${failed} abgelehnt` : ''}`);
+      if (queue.length) {
+        setForAll(false);
+        setReview({ queue, index: 0, yes: new Set(), pass });
+        return;
+      }
+      await checkNearby(pass);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -112,7 +292,7 @@ export function FireboardImport({ nodeId, types, objects, onDone, onClose }: { n
   };
 
   const typeOptions = types.filter((t) => t.data.builtin !== null || t.position !== 'below');
-  const total = lib ? lib.categories.reduce((n, c) => n + (targets[c.id]?.kind === 'skip' ? 0 : pending(c).length), 0) : 0;
+  const total = lib ? lib.categories.reduce((n, c) => n + (targetOf(c).kind === 'skip' ? 0 : pending(c).length), 0) : 0;
   const already = lib ? lib.items.filter((i) => known.has(fireboardSource(i.id))).length : 0;
   const attachments = lib ? lib.items.filter((i) => i.attachments > 0).length : 0;
 
@@ -146,6 +326,8 @@ export function FireboardImport({ nodeId, types, objects, onDone, onClose }: { n
             </button>
           </div>
         </form>
+      ) : review ? (
+        <ReviewStep review={review} forAll={forAll} onForAll={setForAll} onAnswer={answer} />
       ) : (
         <>
           <p className="small muted">
@@ -166,7 +348,7 @@ export function FireboardImport({ nodeId, types, objects, onDone, onClose }: { n
               </thead>
               <tbody>
                 {lib.categories.map((c) => {
-                  const t = targets[c.id] ?? { kind: 'skip' };
+                  const t = targetOf(c);
                   const value = t.kind === 'type' ? t.uid : t.kind === 'new' ? `new:${t.name}` : 'skip';
                   return (
                     <tr key={c.id}>
@@ -208,6 +390,60 @@ export function FireboardImport({ nodeId, types, objects, onDone, onClose }: { n
       )}
       {busy && <p className="notice">{busy}</p>}
       {error && <p className="error">{error}</p>}
+    </div>
+  );
+}
+
+const fmtArt = (art: string | null) => (art ? ` (${art})` : '');
+
+/** Rückfrage: Lage außerhalb der eigenen Gebietskörperschaft bzw. mögliche Doppeleinträge */
+function ReviewStep({ review, forAll, onForAll, onAnswer }: { review: Review; forAll: boolean; onForAll: (v: boolean) => void; onAnswer: (yes: boolean) => void }) {
+  const q = review.queue[review.index]!;
+  const rest = review.queue.length - review.index;
+  const item = q.item;
+  return (
+    <div className="fb-review">
+      <p className="small muted">
+        {q.kind === 'area' ? <MapPinned size={14} /> : <Copy size={14} />}{' '}
+        {q.kind === 'area'
+          ? `${review.queue.length} Wasserentnahmestellen liegen außerhalb Ihrer Gebietskörperschaft`
+          : `${review.queue.length} Wasserentnahmestellen haben im Umkreis von ${NEAR_M} m schon eine gleicher Art`}{' '}
+        – noch {rest} zu entscheiden.
+      </p>
+      <p>
+        <strong>{item.name}</strong>
+        {fmtArt(item.art)}
+        {item.address && item.address !== item.name && <span className="muted"> – {item.address}</span>}{' '}
+        {q.kind === 'area' ? (
+          q.place ? (
+            <>
+              liegt in <strong>{q.place.name}</strong>. Der Gebietskörperschaft {q.place.name} zuordnen?
+            </>
+          ) : (
+            <>liegt außerhalb Deutschlands bzw. der Gemeindegrenzen. Importieren geht nicht.</>
+          )
+        ) : (
+          <>
+            – {Math.round(q.other.distance)} m entfernt {q.other.inImport ? 'kommt im selben Import schon' : 'gibt es schon'} <strong>{q.other.name}</strong>
+            {fmtArt(q.other.art)}. Wirklich importieren?
+          </>
+        )}
+      </p>
+      {q.kind === 'area' && q.place && !q.allowed && <p className="notice small">Sie haben in {q.place.name} kein Pflegerecht – bei „Ja“ wird sie trotzdem nicht importiert.</p>}
+      <p className="muted small">
+        Lage: {item.lat.toFixed(5)}, {item.lon.toFixed(5)} · bei „Nein“ wird sie nicht importiert.
+      </p>
+      <div className="row" style={{ alignItems: 'center' }}>
+        <button className="btn btn-primary" onClick={() => onAnswer(true)} disabled={q.kind === 'area' && !q.place}>
+          <Check size={14} /> {q.kind === 'area' ? 'Ja, zuordnen' : 'Ja, importieren'}
+        </button>
+        <button className="btn" onClick={() => onAnswer(false)}>
+          <X size={14} /> Nein
+        </button>
+        <label className="check-inline">
+          <input type="checkbox" checked={forAll} onChange={(e) => onForAll(e.target.checked)} /> Für alle weiteren Wasserentnahmestellen so verfahren
+        </label>
+      </div>
     </div>
   );
 }
