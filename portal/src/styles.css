@@ -189,3 +189,13 @@ textarea { font: inherit; width: 100%; padding: 8px 10px; border-radius: 8px; bo
 .fb-table td { padding: 6px 10px; border-top: 1px solid var(--border); }
 .fb-table td:nth-child(2) { text-align: right; font-variant-numeric: tabular-nums; }
 .fb-table select { width: 100%; }
+
+/* Verwaltung: Benutzerliste */
+.admin-search { display: flex; align-items: center; gap: 8px; border: 1px solid var(--border); border-radius: 8px; padding: 0 10px; background: var(--bg); color: var(--muted); }
+.admin-search input { border: 0; background: none; min-height: 38px; flex: 1; }
+.admin-row { width: 100%; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 4px 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.admin-row .title { font-weight: 600; }
+.admin-detail { display: grid; gap: 10px; margin: 8px 0 4px 26px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
+.admin-detail select { width: auto; }
+.admin-detail .row > select.grow { flex: 1 1 260px; }
+.admin-detail .list li > .grow { flex: 1 1 auto; }

@@ -174,3 +174,52 @@ export interface InvitationInfo {
   expired: boolean;
   accepted: boolean;
 }
+
+// --- Verwaltung (nur Betreiber) ---
+
+export interface AdminAccount {
+  id: string;
+  email: string;
+  name: string;
+  operator: boolean;
+  createdAt: string;
+  lastLoginAt: string | null;
+  emailVerified: boolean;
+  /** false: Konto aus der Zeit der Anmeldecodes, noch ohne Passwort */
+  hasPassword: boolean;
+  disabledAt: string | null;
+  disabledBy: string | null;
+  /** Nach Fehlversuchen kurz gesperrt bis */
+  lockedUntil: string | null;
+  /** Gültige Anmeldungen */
+  sessions: number;
+  memberships: Membership[];
+}
+
+export const adminAccountPatchSchema = z
+  .object({
+    name: z.string().trim().min(1, 'Name fehlt').max(80).optional(),
+    email: emailSchema.optional(),
+    operator: z.boolean().optional(),
+    disabled: z.boolean().optional(),
+  })
+  .refine((p) => Object.keys(p).length > 0, 'Nichts zu ändern');
+
+/** Rolle an einem Knoten setzen; null entzieht sie */
+export const adminMembershipSchema = z.object({ nodeId: z.string().min(1).max(60), role: z.enum(CLOUD_ROLES).nullable() });
+
+export type AdminAction = 'edit' | 'operator' | 'disable' | 'enable' | 'reset-link' | 'verify' | 'unlock' | 'logout' | 'delete' | 'role';
+
+export interface AdminLogEntry {
+  at: string;
+  by: string;
+  target: string;
+  action: AdminAction;
+  detail: string;
+}
+
+export interface AdminOverview {
+  accounts: AdminAccount[];
+  /** Alle Knoten mit Pfad (für die Rollenvergabe) */
+  nodes: CloudNodeRef[];
+}
