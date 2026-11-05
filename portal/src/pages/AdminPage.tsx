@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
 import { ChevronDown, ChevronRight, History, KeyRound, LogOut, MailCheck, Search, ShieldCheck, Trash2, Unlock, Users } from 'lucide-react';
-import { ROLE_LABELS, api, type AdminAccount, type AdminLogEntry, type AdminOverview, type CloudNodeRef, type CloudRole, type Me } from '../api';
+import { ROLE_LABELS, api, type AdminAccount, type AdminLogEntry, type AdminOverview, type CloudNodeRef, type CloudRole, type Me, type RegionWithPath } from '../api';
 
 const fmt = (iso: string | null) => (iso ? new Date(iso).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' }) : '–');
 const where = (n: CloudNodeRef) => n.path.join(' › ') || 'Deutschland';
@@ -239,14 +239,7 @@ function AccountDetail({ a, me, nodes, onChange }: { a: AdminAccount; me: Me; no
         {a.memberships.length === 0 && <li className="muted small">Keine Rollen</li>}
       </ul>
       <div className="row">
-        <select className="grow" value={nodeId} onChange={(e) => setNodeId(e.target.value)} aria-label="Bereich">
-          <option value="">Bereich wählen …</option>
-          {nodes.map((n) => (
-            <option key={n.id} value={n.id}>
-              {where(n)}
-            </option>
-          ))}
-        </select>
+        <AreaPicker nodes={nodes} value={nodeId} onChange={setNodeId} />
         <select value={role} onChange={(e) => setRole(e.target.value as CloudRole)} aria-label="Rolle">
           {ROLES.map((r) => (
             <option key={r} value={r}>
@@ -290,5 +283,85 @@ function AdminLog() {
         </ul>
       )}
     </section>
+  );
+}
+
+const KIND_LABEL: Record<RegionWithPath['kind'], string> = { land: 'Land', kreis: 'Kreis', verband: 'Gemeindeverband', gemeinde: 'Gemeinde' };
+const fold = (t: string) => t.toLocaleLowerCase('de').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/ß/g, 'ss');
+
+type AreaHit = { id: string; label: string; hint?: string };
+
+/**
+ * Bereich suchen: bestehende Knoten (auch frei angelegte) und alle Gebietskörperschaften aus dem Katalog. Gebiete,
+ * in denen noch niemand angemeldet war, gibt es als Knoten noch nicht – das Relay legt sie bei der Rollenvergabe an.
+ */
+function AreaPicker({ nodes, value, onChange }: { nodes: CloudNodeRef[]; value: string; onChange: (id: string) => void }) {
+  const [q, setQ] = useState('');
+  const [picked, setPicked] = useState('');
+  const [regions, setRegions] = useState<RegionWithPath[]>([]);
+  const needle = fold(q.trim());
+
+  useEffect(() => {
+    if (needle.length < 2) return setRegions([]);
+    let live = true;
+    const t = setTimeout(() => {
+      api.regions(q.trim()).then((r) => live && setRegions(r), () => live && setRegions([]));
+    }, 200);
+    return () => {
+      live = false;
+      clearTimeout(t);
+    };
+  }, [needle]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const hits = useMemo<AreaHit[]>(() => {
+    if (!needle || value) return [];
+    const known = nodes.filter((n) => fold(where(n)).includes(needle)).map((n) => ({ id: n.id, label: where(n) }));
+    const ids = new Set(known.map((h) => h.id));
+    const fromCatalog = regions
+      .map((r) => ({ id: `ars:${r.ars}`, label: r.path.map((p) => p.name).join(' › '), hint: KIND_LABEL[r.kind] }))
+      .filter((h) => !ids.has(h.id));
+    return [...known, ...fromCatalog].slice(0, 12);
+  }, [needle, value, nodes, regions]);
+
+  // Nach der Vergabe setzt der Aufrufer die Auswahl zurück, dann leert sich auch das Suchfeld
+  useEffect(() => {
+    if (!value) setQ((cur) => (cur === picked ? '' : cur));
+  }, [value, picked]);
+
+  const pick = (h: AreaHit) => {
+    onChange(h.id);
+    setPicked(h.label);
+    setQ(h.label);
+  };
+
+  return (
+    <div className="grow" style={{ position: 'relative', minWidth: 0 }}>
+      <label className="admin-search">
+        <Search size={16} />
+        <input
+          value={q}
+          onChange={(e) => {
+            setQ(e.target.value);
+            if (value) onChange('');
+          }}
+          placeholder="Bereich suchen (Land, Kreis, Gemeinde …)"
+          aria-label="Bereich"
+          aria-autocomplete="list"
+        />
+      </label>
+      {hits.length > 0 && (
+        <ul className="list area-hits" role="listbox">
+          {hits.map((h) => (
+            <li key={h.id}>
+              <button type="button" className="admin-row" role="option" aria-selected={false} onClick={() => pick(h)}>
+                <span className="grow">{h.label}</span>
+                {h.hint && <span className="muted small">{h.hint}</span>}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {!value && needle.length >= 2 && hits.length === 0 && <p className="muted small">Kein Bereich gefunden</p>}
+    </div>
   );
 }

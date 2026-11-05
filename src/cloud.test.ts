@@ -616,6 +616,20 @@ describe('Verwaltung durch Betreiber', () => {
     expect((await portal('POST', '/v1/cloud/login', { body: { email: 'offen@example.org', password: PASSWORD } })).status).toBe(200);
   });
 
+  it('Rolle in einer Gebietskörperschaft vergeben, in der noch niemand angemeldet war', async () => {
+    const op = await operator();
+    const anna = await login('anna@example.org');
+    const VECHTA = 'ars:03460';
+    expect((await portal<AdminOverview>('GET', '/v1/cloud/admin', { cookie: op.cookie })).body.nodes.map((n) => n.id)).not.toContain(VECHTA);
+    // Das Portal findet sie über den Katalog
+    const hits = (await portal<{ ars: string }[]>('GET', '/v1/regions?q=Vechta')).body;
+    expect(hits.map((h) => h.ars)).toContain('03460');
+    const set = await portal<AdminAccount>('PUT', `/v1/cloud/admin/accounts/${anna.me.id}/membership`, { cookie: op.cookie, body: { nodeId: VECHTA, role: 'admin' } });
+    expect(set.status).toBe(200);
+    expect(set.body.memberships).toEqual([{ node: { id: VECHTA, name: 'Landkreis Vechta', path: ['Niedersachsen', 'Landkreis Vechta'] }, role: 'admin' }]);
+    expect((await portal<AdminOverview>('GET', '/v1/cloud/admin', { cookie: op.cookie })).body.nodes.map((n) => n.id)).toContain(VECHTA);
+  });
+
   it('Rollen in beliebigen Bereichen vergeben und entziehen, Konto löschen, alles im Protokoll', async () => {
     const op = await operator();
     const kreis = await invite(op.cookie, KREIS, 'kbm@lk-diepholz.de', 'admin');
