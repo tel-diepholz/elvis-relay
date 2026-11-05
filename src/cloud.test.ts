@@ -536,6 +536,12 @@ describe('Objektbibliothek in der Cloud', () => {
       body: { kind: 'object', nodeId: KREIS, items: [{ typeUid: WATER, name: item.name, lat: item.lat, lon: item.lon, notes: item.notes, props: { art: item.art, dn: item.dn }, source: `fireboard:${item.id}` }] },
     });
     expect(imp.body.created).toBe(1);
+    // Gleiche Herkunft ein zweites Mal (auch an einem anderen Knoten): übersprungen
+    const again = await portal<{ created: number; skipped: number }>('POST', '/v1/cloud/records/batch', {
+      cookie: kreis.cookie,
+      body: { kind: 'object', nodeId: WEYHE, items: [{ typeUid: WATER, name: item.name, lat: item.lat, lon: item.lon, source: `fireboard:${item.id}` }, { typeUid: WATER, name: 'Neu', lat: 52.9, lon: 8.8, source: 'fireboard:999999' }] },
+    });
+    expect(again.body).toMatchObject({ created: 1, skipped: 1 });
   });
 });
 

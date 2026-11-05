@@ -253,6 +253,20 @@ Knoten und hat eine Revision. `seq` ist der Änderungszähler, Gelöschtes bleib
 - **Dateien:** Sie liegen in R2 `elvis-library` (`lib/<uid>`), höchstens 50 MB. Sie sind unveränderlich, der
   Datensatz verlangt die vorher hochgeladene Datei mit gleicher Größe. Gelöschte Objekte nehmen ihre Dateien mit.
   Uploads ohne Datensatz räumt der stündliche Cron nach einem Tag weg.
+- **Import mit Herkunft:** Hat ein Objekt eine `source` (z. B. `fireboard:<id>`) und gibt es eine Herkunft schon
+  irgendwo auf der Plattform, überspringt `POST /v1/cloud/records/batch` es (`skipped`). Index `md_records_object_source`.
+- **Import aus Fireboard (Portal):**
+  1. Kategorien den Typen zuordnen.
+  2. Liegt eine Wasserentnahmestelle außerhalb der Gebietskörperschaft des Bereichs, fragt das Portal nach. Bei „Ja“
+     geht sie an die Gemeinde, in der sie liegt (nur mit Pflegerecht dort), bei „Nein“ wird sie nicht importiert.
+  3. Gibt es im Umkreis von 10 m schon eine Wasserentnahmestelle gleicher Art (in der Bibliothek oder im selben
+     Import), fragt das Portal nach, ob sie wirklich importiert werden soll.
+
+  Beide Rückfragen haben „Für alle weiteren so verfahren“.
+- **Gemeindegrenzen:** `portal/public/geo/` erzeugt `scripts/build-boundaries.py` aus VG250 des BKG
+  (`vg250_01-01.utm32s.shape.ebenen.zip`, © GeoBasis-DE / BKG, Datenlizenz Deutschland – Namensnennung – 2.0). Die
+  Grenzen sind auf 15 m vereinfacht, je Kreis eine Datei. Das Portal lädt nur die Kreise, die ein Punkt braucht. Neu
+  erzeugen, wenn VG250 erscheint (jährlich zum 01.01.).
 
 ## Datenschutz
 

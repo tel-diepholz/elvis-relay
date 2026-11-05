@@ -78,7 +78,7 @@ export const api = {
   updateRecord: <K extends RecordKind>(uid: string, baseRev: number, data: RecordDataMap[K]) => request<PortalRecord>('PUT', `/v1/cloud/records/${uid}`, { baseRev, data }),
   createRecordWithUid: <K extends RecordKind>(nodeId: string, kind: K, uid: string, data: RecordDataMap[K]) => request<PortalRecord>('POST', '/v1/cloud/records', { nodeId, kind, uid, data }),
   fireboard: (nodeId: string, email: string, password: string) => request<FireboardLibrary>('POST', '/v1/cloud/import/fireboard', { nodeId, email, password }),
-  importRecords: <K extends RecordKind>(nodeId: string, kind: K, items: RecordDataMap[K][]) => request<{ created: number; errors: { index: number; reason: string }[] }>('POST', '/v1/cloud/records/batch', { nodeId, kind, items }),
+  importRecords: <K extends RecordKind>(nodeId: string, kind: K, items: RecordDataMap[K][]) => request<{ created: number; skipped?: number; errors: { index: number; reason: string }[] }>('POST', '/v1/cloud/records/batch', { nodeId, kind, items }),
   removeRecord: (uid: string, rev: number) => request<null>('DELETE', `/v1/cloud/records/${uid}?rev=${rev}`),
 
   installations: () => request<InstallationStatus[]>('GET', '/v1/cloud/installations'),
