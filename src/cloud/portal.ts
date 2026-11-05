@@ -27,6 +27,8 @@ import { ROOT_ID, atLeast, childNodes, getNode, lineage, nodeRef, roleAt, toClou
 import { installationStatus, type InstallationRow } from './status.js';
 import { blobKey, getRecord, listForNode, visibleFile, writeRecord } from './records.js';
 import { storeUpload } from './elw.js';
+import type { FireboardLibrary } from '../fireboardprotocol.js';
+import { fetchFireboardTree, FireboardError, fireboardLoginSchema, normalizeFireboard } from './fireboard.js';
 import { RECORD_KINDS, recordBatchSchema, recordCreateSchema, recordUpdateSchema, type RecordKind } from '../syncprotocol.js';
 
 interface AccountRow {
@@ -265,6 +267,20 @@ export async function handlePortal(req: Request, env: Env, path: string, url: UR
     if (parsed.data.uid && (await getRecord(db, parsed.data.uid))) return fail(409, 'Datensatz gibt es schon');
     const res = await writeRecord(db, { uid: parsed.data.uid ?? crypto.randomUUID(), kind: parsed.data.kind, nodeId: parsed.data.nodeId, baseRev: 0, deleted: false, data: parsed.data.data, by, mayWrite: mayEdit, blobs: env.LIBRARY }, now);
     return res.status === 'ok' ? json(201, res.record) : fail(res.status === 'invalid' ? 400 : 403, res.reason);
+  }
+  // --- Import aus Fireboard: anmelden, Kartenbaum holen, aufbereitet zurück (Zugangsdaten werden nicht gespeichert) ---
+  if (req.method === 'POST' && path === '/v1/cloud/import/fireboard') {
+    const parsed = fireboardLoginSchema.safeParse(await body(req));
+    if (!parsed.success) return fail(400, parsed.error.issues[0]?.message ?? 'Eingabe ungültig');
+    if (!(await getNode(db, parsed.data.nodeId))) return fail(404, 'Knoten nicht gefunden');
+    if (!(await mayEdit(parsed.data.nodeId))) return fail(403, 'Kein Recht zum Pflegen an diesem Knoten');
+    try {
+      const tree = await fetchFireboardTree(parsed.data.email, parsed.data.password, env.FIREBOARD_FETCH);
+      return json(200, normalizeFireboard(tree) satisfies FireboardLibrary);
+    } catch (e) {
+      if (e instanceof FireboardError) return fail(e.status, e.message);
+      throw e;
+    }
   }
   if (req.method === 'POST' && path === '/v1/cloud/records/batch') {
     const parsed = recordBatchSchema.safeParse(await body(req));
