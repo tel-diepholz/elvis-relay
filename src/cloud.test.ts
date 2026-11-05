@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { CloudLinkStatus, InstallationStatus, InvitationInfo, Me, NodeDetail } from './cloudprotocol.js';
+import type { AdminAccount, AdminLogEntry, AdminOverview, CloudLinkStatus, InstallationStatus, InvitationInfo, Me, NodeDetail } from './cloudprotocol.js';
 import { base64url, sha256Hex } from './http.js';
 import { MAIL_SIGNATURE_HEADER, mailSignaturePayload } from './mailprotocol.js';
 import type { ElwRegistration } from './protocol.js';
@@ -38,14 +38,23 @@ async function portal<T = unknown>(method: string, path: string, opts: { body?: 
   return { status: res.status, body: (text ? JSON.parse(text) : null) as T, cookie: res.headers.get('set-cookie') };
 }
 
-/** Anmelden: Code anfordern, aus der Mail lesen, bestätigen */
-async function login(email: string, name = '') {
-  expect((await portal('POST', '/v1/cloud/login', { body: { email } })).status).toBe(202);
-  const code = /Anmeldecode (\d{6})/.exec(decoded(mails.at(-1)!.raw))?.[1] ?? /\n {2}(\d{6})\n/.exec(decoded(mails.at(-1)!.raw))![1]!;
-  const res = await portal<Me>('POST', '/v1/cloud/login/verify', { body: { email, code, name } });
+const PASSWORD = 'lange-geheime-Phrase';
+/** Link aus der letzten Mail an die Adresse, z. B. /bestaetigen/<token> */
+const linkIn = (to: string, path: string) => new RegExp(`/${path}/([A-Za-z0-9_-]{43})`).exec(decoded(mails.filter((m) => m.to === to).at(-1)!.raw))![1]!;
+
+/** Konto anlegen (registrieren, Link aus der Mail bestätigen) bzw. mit Passwort anmelden */
+async function login(email: string, name = 'Test') {
+  const lower = email.toLowerCase();
+  const known = await env.DB.prepare('SELECT 1 FROM accounts WHERE email = ?').bind(lower).first();
+  if (!known) {
+    expect((await portal('POST', '/v1/cloud/register', { body: { email, name, password: PASSWORD } })).status).toBe(202);
+    const res = await portal<Me>('POST', '/v1/cloud/verify', { body: { token: linkIn(lower, 'bestaetigen') } });
+    expect(res.status).toBe(200);
+    return { cookie: res.cookie!.split(';')[0]!, me: res.body };
+  }
+  const res = await portal<Me>('POST', '/v1/cloud/login', { body: { email, password: PASSWORD } });
   expect(res.status).toBe(200);
-  const cookie = res.cookie!.split(';')[0]!;
-  return { cookie, me: res.body };
+  return { cookie: res.cookie!.split(';')[0]!, me: res.body };
 }
 
 async function operator(email = 'betrieb@example.org') {
@@ -93,24 +102,125 @@ async function installation() {
   return { elwId: reg.elwId, sigPublicKey, call };
 }
 
-describe('Anmeldung', () => {
-  it('legt beim ersten Code das Konto an und hält die Sitzung im Cookie', async () => {
-    const { cookie, me } = await login('Anna@Example.org', 'Anna Admin');
-    expect(me).toMatchObject({ email: 'anna@example.org', name: 'Anna Admin', operator: false, memberships: [] });
-    expect((await portal('GET', '/v1/cloud/me')).status).toBe(401);
+describe('Konto und Anmeldung', () => {
+  it('Registrieren, Adresse bestätigen, mit Passwort anmelden, abmelden', async () => {
+    const reg = await portal('POST', '/v1/cloud/register', { body: { email: 'Anna@Example.org', name: 'Anna Admin', password: PASSWORD } });
+    expect(reg.status).toBe(202);
+    expect(reg.cookie).toBeNull();
+    // Vor der Bestätigung keine Anmeldung
+    expect((await portal('POST', '/v1/cloud/login', { body: { email: 'anna@example.org', password: PASSWORD } })).status).toBe(403);
+    const verified = await portal<Me>('POST', '/v1/cloud/verify', { body: { token: linkIn('anna@example.org', 'bestaetigen') } });
+    expect(verified.body).toMatchObject({ email: 'anna@example.org', name: 'Anna Admin', operator: false, memberships: [] });
+    const cookie = verified.cookie!.split(';')[0]!;
     expect((await portal<Me>('GET', '/v1/cloud/me', { cookie })).body.email).toBe('anna@example.org');
-    // Zweites Anmelden: gleiches Konto
-    expect((await login('anna@example.org')).me.id).toBe(me.id);
+    expect((await portal('GET', '/v1/cloud/me')).status).toBe(401);
+    expect(await env.DB.prepare('SELECT password_hash FROM accounts').first()).toEqual({ password_hash: expect.stringMatching(/^pbkdf2-sha256\$100000\$/) });
+    // Link gilt nur einmal
+    expect((await portal('POST', '/v1/cloud/verify', { body: { token: linkIn('anna@example.org', 'bestaetigen') } })).status).toBe(410);
+
+    expect((await portal('POST', '/v1/cloud/login', { body: { email: 'anna@example.org', password: 'falsch-falsch' } })).status).toBe(401);
+    const again = await portal<Me>('POST', '/v1/cloud/login', { body: { email: 'ANNA@example.org', password: PASSWORD } });
+    expect(again.body.id).toBe(verified.body.id);
     expect((await portal('POST', '/v1/cloud/logout', { cookie, body: {} })).status).toBe(204);
     expect((await portal('GET', '/v1/cloud/me', { cookie })).status).toBe(401);
   });
 
-  it('begrenzt Fehlversuche und Codes je Stunde', async () => {
-    await portal('POST', '/v1/cloud/login', { body: { email: 'x@example.org' } });
-    for (let i = 0; i < 5; i++) expect((await portal('POST', '/v1/cloud/login/verify', { body: { email: 'x@example.org', code: '000000' } })).status).toBeGreaterThanOrEqual(401);
-    expect((await portal('POST', '/v1/cloud/login/verify', { body: { email: 'x@example.org', code: '000000' } })).status).toBe(429);
-    for (let i = 0; i < 4; i++) await portal('POST', '/v1/cloud/login', { body: { email: 'x@example.org' } });
-    expect((await portal('POST', '/v1/cloud/login', { body: { email: 'x@example.org' } })).status).toBe(429);
+  it('verrät nicht, ob es eine Adresse schon gibt; Passwortregeln', async () => {
+    await login('anna@example.org');
+    const dup = await portal('POST', '/v1/cloud/register', { body: { email: 'anna@example.org', name: 'X', password: 'anderes-Passwort' } });
+    expect(dup.status).toBe(202);
+    expect(decoded(mails.at(-1)!.raw)).toContain('gibt es schon ein Konto');
+    expect((await portal('POST', '/v1/cloud/login', { body: { email: 'anna@example.org', password: 'anderes-Passwort' } })).status).toBe(401);
+    expect((await portal('POST', '/v1/cloud/login', { body: { email: 'niemand@example.org', password: PASSWORD } })).body).toEqual({ error: 'E-Mail-Adresse oder Passwort falsch' });
+    expect((await portal<{ error: string }>('POST', '/v1/cloud/register', { body: { email: 'b@example.org', name: 'B', password: 'kurz' } })).body.error).toMatch(/mindestens 10/);
+    expect((await portal('POST', '/v1/cloud/register', { body: { email: 'b@example.org', name: 'B', password: 'b@example.org' } })).status).toBe(400);
+    // Neuer Bestätigungslink auf Anfrage
+    await portal('POST', '/v1/cloud/register', { body: { email: 'c@example.org', name: 'C', password: PASSWORD } });
+    const first = linkIn('c@example.org', 'bestaetigen');
+    expect((await portal('POST', '/v1/cloud/verify/resend', { body: { email: 'c@example.org' } })).status).toBe(202);
+    expect((await portal('POST', '/v1/cloud/verify', { body: { token: first } })).status).toBe(410);
+    expect((await portal('POST', '/v1/cloud/verify', { body: { token: linkIn('c@example.org', 'bestaetigen') } })).status).toBe(200);
+  });
+
+  it('sperrt nach fünf falschen Passwörtern für 15 Minuten', async () => {
+    await login('anna@example.org');
+    for (let i = 0; i < 5; i++) expect((await portal('POST', '/v1/cloud/login', { body: { email: 'anna@example.org', password: 'falsch-falsch' } })).status).toBe(401);
+    expect((await portal('POST', '/v1/cloud/login', { body: { email: 'anna@example.org', password: PASSWORD } })).status).toBe(429);
+    now = new Date(now.getTime() + 16 * 60_000);
+    expect((await portal('POST', '/v1/cloud/login', { body: { email: 'anna@example.org', password: PASSWORD } })).status).toBe(200);
+  });
+
+  it('Passwort vergessen: Link per Mail, neues Passwort, überall abgemeldet; bisherige Konten ohne Passwort', async () => {
+    const a = await login('anna@example.org');
+    expect((await portal('POST', '/v1/cloud/password/forgot', { body: { email: 'niemand@example.org' } })).status).toBe(202);
+    const before = mails.length;
+    expect((await portal('POST', '/v1/cloud/password/forgot', { body: { email: 'anna@example.org' } })).status).toBe(202);
+    expect(mails.length).toBe(before + 1);
+    const token = linkIn('anna@example.org', 'passwort-zuruecksetzen');
+    expect((await portal('POST', '/v1/cloud/password/reset', { body: { token, password: 'kurz' } })).status).toBe(400);
+    const reset = await portal<Me>('POST', '/v1/cloud/password/reset', { body: { token, password: 'ganz-neues-Passwort' } });
+    expect(reset.status).toBe(200);
+    expect((await portal('GET', '/v1/cloud/me', { cookie: a.cookie })).status).toBe(401);
+    expect((await portal('POST', '/v1/cloud/password/reset', { body: { token, password: 'noch-ein-Passwort' } })).status).toBe(410);
+    expect((await portal('POST', '/v1/cloud/login', { body: { email: 'anna@example.org', password: 'ganz-neues-Passwort' } })).status).toBe(200);
+    // Link verfällt nach einer Stunde
+    await portal('POST', '/v1/cloud/password/forgot', { body: { email: 'anna@example.org' } });
+    const late = linkIn('anna@example.org', 'passwort-zuruecksetzen');
+    now = new Date(now.getTime() + 61 * 60_000);
+    expect((await portal('POST', '/v1/cloud/password/reset', { body: { token: late, password: 'zu-spaet-Passwort' } })).status).toBe(410);
+
+    // Konto aus der Zeit der Anmeldecodes: kein Passwort, setzt es über „Passwort vergessen“
+    await env.DB.prepare("INSERT INTO accounts (id, email, name, created_at, email_verified_at) VALUES ('alt', 'alt@example.org', 'Alt', 'x', 'x')").run();
+    expect((await portal('POST', '/v1/cloud/login', { body: { email: 'alt@example.org', password: PASSWORD } })).status).toBe(401);
+    await portal('POST', '/v1/cloud/password/forgot', { body: { email: 'alt@example.org' } });
+    expect((await portal<Me>('POST', '/v1/cloud/password/reset', { body: { token: linkIn('alt@example.org', 'passwort-zuruecksetzen'), password: PASSWORD } })).body.id).toBe('alt');
+  });
+
+  it('Passwort und E-Mail-Adresse ändern, andere Sitzungen beenden, Konto löschen', async () => {
+    const a = await login('anna@example.org');
+    const b = await login('anna@example.org');
+    expect((await portal('POST', '/v1/cloud/password', { cookie: a.cookie, body: { current: 'falsch', password: 'neues-Passwort-1' } })).status).toBe(403);
+    expect((await portal('POST', '/v1/cloud/password', { cookie: a.cookie, body: { current: PASSWORD, password: 'neues-Passwort-1' } })).status).toBe(200);
+    expect((await portal('GET', '/v1/cloud/me', { cookie: a.cookie })).status).toBe(200);
+    expect((await portal('GET', '/v1/cloud/me', { cookie: b.cookie })).status).toBe(401);
+    expect(decoded(mails.at(-1)!.raw)).toContain('Passwort Ihres Kontos bei ELVIS Cloud wurde geändert');
+
+    // Neue Adresse: erst nach Bestätigung, Hinweis an die alte
+    expect((await portal('POST', '/v1/cloud/email', { cookie: a.cookie, body: { email: 'anna@neu.example', password: 'falsch' } })).status).toBe(403);
+    expect((await portal('POST', '/v1/cloud/email', { cookie: a.cookie, body: { email: 'anna@neu.example', password: 'neues-Passwort-1' } })).status).toBe(202);
+    expect((await portal<Me>('GET', '/v1/cloud/me', { cookie: a.cookie })).body.email).toBe('anna@example.org');
+    expect((await portal<{ email: string }>('POST', '/v1/cloud/email/confirm', { body: { token: linkIn('anna@neu.example', 'email-bestaetigen') } })).body.email).toBe('anna@neu.example');
+    expect((await portal<Me>('GET', '/v1/cloud/me', { cookie: a.cookie })).body.email).toBe('anna@neu.example');
+    expect(mails.at(-1)!.to).toBe('anna@example.org');
+
+    const cRes = await portal('POST', '/v1/cloud/login', { body: { email: 'anna@neu.example', password: 'neues-Passwort-1' } });
+    const c = { cookie: cRes.cookie!.split(';')[0]! };
+    expect((await portal<{ ended: number }>('POST', '/v1/cloud/logout/others', { cookie: c.cookie, body: {} })).body.ended).toBe(1);
+    expect((await portal('GET', '/v1/cloud/me', { cookie: a.cookie })).status).toBe(401);
+
+    expect((await portal('DELETE', '/v1/cloud/me', { cookie: c.cookie, body: { password: 'falsch' } })).status).toBe(403);
+    expect((await portal('DELETE', '/v1/cloud/me', { cookie: c.cookie, body: { password: 'neues-Passwort-1' } })).status).toBe(204);
+    expect((await portal('POST', '/v1/cloud/login', { body: { email: 'anna@neu.example', password: 'neues-Passwort-1' } })).status).toBe(401);
+  });
+
+  it('einziger Admin eines Bereichs kann sein Konto nicht löschen', async () => {
+    const op = await operator();
+    const kreis = await invite(op.cookie, KREIS, 'kbm@lk-diepholz.de', 'admin');
+    const r = await portal<{ error: string }>('DELETE', '/v1/cloud/me', { cookie: kreis.cookie, body: { password: PASSWORD } });
+    expect(r.status).toBe(409);
+    expect(r.body.error).toMatch(/allein/);
+  });
+
+  it('mit Einladung registriert: Adresse gilt sofort als bestätigt', async () => {
+    const op = await operator();
+    expect((await portal('POST', '/v1/cloud/invitations', { cookie: op.cookie, body: { nodeId: KREIS, email: 'neu@lk-diepholz.de', role: 'editor' } })).status).toBe(201);
+    const token = linkIn('neu@lk-diepholz.de', 'einladung');
+    const reg = await portal<Me>('POST', '/v1/cloud/register', { body: { email: 'neu@lk-diepholz.de', name: 'Neu', password: PASSWORD, invitation: token } });
+    expect(reg.status).toBe(200);
+    const accepted = await portal<Me>('POST', `/v1/cloud/invitations/token/${token}/accept`, { cookie: reg.cookie!.split(';')[0]!, body: {} });
+    expect(accepted.body.memberships).toHaveLength(1);
+    // Mit fremder Adresse hilft die Einladung nicht
+    expect((await portal('POST', '/v1/cloud/register', { body: { email: 'anders@example.org', name: 'A', password: PASSWORD, invitation: token } })).status).toBe(202);
   });
 
   it('lehnt fremde Origin und Formulare ab', async () => {
@@ -426,5 +536,101 @@ describe('Objektbibliothek in der Cloud', () => {
       body: { kind: 'object', nodeId: KREIS, items: [{ typeUid: WATER, name: item.name, lat: item.lat, lon: item.lon, notes: item.notes, props: { art: item.art, dn: item.dn }, source: `fireboard:${item.id}` }] },
     });
     expect(imp.body.created).toBe(1);
+  });
+});
+
+describe('Verwaltung durch Betreiber', () => {
+  it('nur Betreiber sehen alle Konten mit Status und Rollen', async () => {
+    const op = await operator();
+    const kreis = await invite(op.cookie, KREIS, 'kbm@lk-diepholz.de', 'admin');
+    await portal('POST', '/v1/cloud/register', { body: { email: 'offen@example.org', name: 'Offen', password: PASSWORD } });
+    expect((await portal('GET', '/v1/cloud/admin', { cookie: kreis.cookie })).status).toBe(403);
+    const all = (await portal<AdminOverview>('GET', '/v1/cloud/admin', { cookie: op.cookie })).body;
+    // Betreiber zuerst, dann nach Namen
+    expect(all.accounts.map((a) => a.email)).toEqual(['betrieb@example.org', 'offen@example.org', 'kbm@lk-diepholz.de']);
+    expect(all.accounts[0]).toMatchObject({ operator: true, emailVerified: true, hasPassword: true, sessions: 1 });
+    expect(all.accounts.find((a) => a.email === 'offen@example.org')).toMatchObject({ emailVerified: false, sessions: 0, memberships: [] });
+    expect(all.accounts.find((a) => a.email === 'kbm@lk-diepholz.de')!.memberships).toEqual([{ node: expect.objectContaining({ id: KREIS, path: ['Niedersachsen', 'Landkreis Diepholz'] }), role: 'admin' }]);
+    expect(all.nodes.map((n) => n.id)).toContain(KREIS);
+    expect((await portal<AdminOverview>('GET', '/v1/cloud/admin?q=lk-diepholz', { cookie: op.cookie })).body.accounts).toHaveLength(1);
+  });
+
+  it('sperren beendet Anmeldungen und verhindert neue; entsperren', async () => {
+    const op = await operator();
+    const anna = await login('anna@example.org');
+    const id = anna.me.id;
+    const r = await portal<AdminAccount>('PATCH', `/v1/cloud/admin/accounts/${id}`, { cookie: op.cookie, body: { disabled: true } });
+    expect(r.body).toMatchObject({ disabledBy: 'betrieb@example.org', sessions: 0 });
+    expect((await portal('GET', '/v1/cloud/me', { cookie: anna.cookie })).status).toBe(401);
+    expect((await portal('POST', '/v1/cloud/login', { body: { email: 'anna@example.org', password: PASSWORD } })).status).toBe(423);
+    // Auch kein Umweg über „Passwort vergessen“
+    const before = mails.length;
+    await portal('POST', '/v1/cloud/password/forgot', { body: { email: 'anna@example.org' } });
+    expect(mails.length).toBe(before);
+    await portal('PATCH', `/v1/cloud/admin/accounts/${id}`, { cookie: op.cookie, body: { disabled: false } });
+    expect((await portal('POST', '/v1/cloud/login', { body: { email: 'anna@example.org', password: PASSWORD } })).status).toBe(200);
+  });
+
+  it('Betreiber ernennen, nicht sich selbst entmachten, letzter Betreiber bleibt', async () => {
+    const op = await operator();
+    const anna = await login('anna@example.org');
+    expect((await portal('PATCH', `/v1/cloud/admin/accounts/${op.me.id}`, { cookie: op.cookie, body: { operator: false } })).status).toBe(409);
+    expect((await portal('PATCH', `/v1/cloud/admin/accounts/${op.me.id}`, { cookie: op.cookie, body: { disabled: true } })).status).toBe(409);
+    expect((await portal<AdminAccount>('PATCH', `/v1/cloud/admin/accounts/${anna.me.id}`, { cookie: op.cookie, body: { operator: true } })).body.operator).toBe(true);
+    // Jetzt darf Anna den ersten Betreiber entmachten, aber nicht mehr sich selbst als letzte
+    expect((await portal('PATCH', `/v1/cloud/admin/accounts/${op.me.id}`, { cookie: anna.cookie, body: { operator: false } })).status).toBe(200);
+    expect((await portal('GET', '/v1/cloud/admin', { cookie: op.cookie })).status).toBe(403);
+    expect((await portal('DELETE', `/v1/cloud/admin/accounts/${anna.me.id}`, { cookie: anna.cookie })).status).toBe(409);
+  });
+
+  it('Name und Adresse ändern, Link zum Zurücksetzen, bestätigen, Fehlversuch-Sperre aufheben, abmelden', async () => {
+    const op = await operator();
+    const anna = await login('anna@example.org');
+    const id = anna.me.id;
+    const changed = await portal<AdminAccount>('PATCH', `/v1/cloud/admin/accounts/${id}`, { cookie: op.cookie, body: { name: 'Anna Neu', email: 'anna@neu.example' } });
+    expect(changed.body).toMatchObject({ name: 'Anna Neu', email: 'anna@neu.example', emailVerified: true });
+    expect(mails.at(-1)!.to).toBe('anna@example.org');
+    expect((await portal('PATCH', `/v1/cloud/admin/accounts/${id}`, { cookie: op.cookie, body: { email: 'betrieb@example.org' } })).status).toBe(409);
+
+    await portal('POST', `/v1/cloud/admin/accounts/${id}/reset-link`, { cookie: op.cookie, body: {} });
+    expect((await portal('POST', '/v1/cloud/password/reset', { body: { token: linkIn('anna@neu.example', 'passwort-zuruecksetzen'), password: 'vom-Betreiber-angestossen' } })).status).toBe(200);
+
+    for (let i = 0; i < 5; i++) await portal('POST', '/v1/cloud/login', { body: { email: 'anna@neu.example', password: 'falsch-falsch' } });
+    const locked = (await portal<AdminOverview>('GET', '/v1/cloud/admin', { cookie: op.cookie })).body.accounts.find((a) => a.id === id)!;
+    expect(locked.lockedUntil).not.toBeNull();
+    expect((await portal<AdminAccount>('POST', `/v1/cloud/admin/accounts/${id}/unlock`, { cookie: op.cookie, body: {} })).body.lockedUntil).toBeNull();
+    const s = await portal('POST', '/v1/cloud/login', { body: { email: 'anna@neu.example', password: 'vom-Betreiber-angestossen' } });
+    expect(s.status).toBe(200);
+    expect((await portal<AdminAccount>('POST', `/v1/cloud/admin/accounts/${id}/logout`, { cookie: op.cookie, body: {} })).body.sessions).toBe(0);
+    expect((await portal('GET', '/v1/cloud/me', { cookie: s.cookie!.split(';')[0]! })).status).toBe(401);
+
+    await portal('POST', '/v1/cloud/register', { body: { email: 'offen@example.org', name: 'Offen', password: PASSWORD } });
+    const offen = (await portal<AdminOverview>('GET', '/v1/cloud/admin?q=offen', { cookie: op.cookie })).body.accounts[0]!;
+    expect((await portal<AdminAccount>('POST', `/v1/cloud/admin/accounts/${offen.id}/verify`, { cookie: op.cookie, body: {} })).body.emailVerified).toBe(true);
+    expect((await portal('POST', '/v1/cloud/login', { body: { email: 'offen@example.org', password: PASSWORD } })).status).toBe(200);
+  });
+
+  it('Rollen in beliebigen Bereichen vergeben und entziehen, Konto löschen, alles im Protokoll', async () => {
+    const op = await operator();
+    const kreis = await invite(op.cookie, KREIS, 'kbm@lk-diepholz.de', 'admin');
+    const anna = await login('anna@example.org');
+    const set = await portal<AdminAccount>('PUT', `/v1/cloud/admin/accounts/${anna.me.id}/membership`, { cookie: op.cookie, body: { nodeId: KREIS, role: 'editor' } });
+    expect(set.body.memberships).toEqual([{ node: expect.objectContaining({ id: KREIS }), role: 'editor' }]);
+    expect((await portal<Me>('GET', '/v1/cloud/me', { cookie: anna.cookie })).body.memberships).toHaveLength(1);
+    expect((await portal('PUT', `/v1/cloud/admin/accounts/${anna.me.id}/membership`, { cookie: op.cookie, body: { nodeId: 'gibts-nicht', role: 'editor' } })).status).toBe(404);
+    expect((await portal<AdminAccount>('PUT', `/v1/cloud/admin/accounts/${anna.me.id}/membership`, { cookie: op.cookie, body: { nodeId: KREIS, role: null } })).body.memberships).toEqual([]);
+
+    // Einziger Admin des Kreises: erst jemand anderen einsetzen
+    expect((await portal('DELETE', `/v1/cloud/admin/accounts/${kreis.me.id}`, { cookie: op.cookie })).status).toBe(409);
+    expect((await portal('DELETE', `/v1/cloud/admin/accounts/${anna.me.id}`, { cookie: op.cookie })).status).toBe(204);
+    expect((await portal('POST', '/v1/cloud/login', { body: { email: 'anna@example.org', password: PASSWORD } })).status).toBe(401);
+
+    const log = (await portal<AdminLogEntry[]>('GET', '/v1/cloud/admin/log', { cookie: op.cookie })).body;
+    expect(log.map((e) => [e.target, e.action])).toEqual([
+      ['anna@example.org', 'delete'],
+      ['anna@example.org', 'role'],
+      ['anna@example.org', 'role'],
+    ]);
+    expect(log[2]).toMatchObject({ by: 'betrieb@example.org', detail: 'Niedersachsen › Landkreis Diepholz: Pflegen' });
   });
 });

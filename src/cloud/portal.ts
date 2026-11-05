@@ -1,16 +1,28 @@
 import {
   INVITATION_TTL_MS,
-  LOGIN_CODE_TTL_MS,
-  LOGIN_MAILS_PER_HOUR,
-  LOGIN_MAX_ATTEMPTS,
+  ACCOUNT_MAILS_PER_HOUR,
+  LOGIN_LOCK_MS,
+  LOGIN_MAX_FAILURES,
+  RESET_TTL_MS,
+  VERIFY_TTL_MS,
   SESSION_COOKIE,
   SESSION_TTL_MS,
   CLOUD_ROLE_LABELS,
+  adminAccountPatchSchema,
+  adminMembershipSchema,
+  type AdminAction,
+  type AdminOverview,
   freeNodeSchema,
   invitationSchema,
   linkInstallationSchema,
-  loginRequestSchema,
-  loginVerifySchema,
+  changeEmailSchema,
+  changePasswordSchema,
+  deleteAccountSchema,
+  emailOnlySchema,
+  linkTokenSchema,
+  loginSchema,
+  registerSchema,
+  resetPasswordSchema,
   memberRoleSchema,
   moveInstallationSchema,
   renameNodeSchema,
@@ -20,7 +32,9 @@ import {
   type Me,
   type NodeDetail,
 } from '../cloudprotocol.js';
-import { body, fail, hash, json, newToken, random, sameCode } from '../http.js';
+import { hashPassword, verifyPassword } from './passwords.js';
+import { adminAccounts, adminLog, allNodes, logAdmin } from './admin.js';
+import { body, fail, hash, json, newToken } from '../http.js';
 import { mailDomain, sendSystemMail } from '../mail.js';
 import type { Env } from '../relay.js';
 import { ROOT_ID, atLeast, childNodes, getNode, lineage, nodeRef, roleAt, toCloudNode } from './nodes.js';
@@ -50,7 +64,6 @@ const LINK_ATTEMPTS_PER_HOUR = 10;
 const toAccount = (r: AccountRow): Account => ({ id: r.id, email: r.email, name: r.name, operator: r.operator === 1 });
 const ago = (now: Date, ms: number) => new Date(now.getTime() - ms).toISOString();
 const later = (now: Date, ms: number) => new Date(now.getTime() + ms).toISOString();
-const newLoginCode = () => String(new DataView(random(4).buffer).getUint32(0) % 1_000_000).padStart(6, '0');
 export const cloudUrl = (env: Env) => (env.CLOUD_URL ?? 'https://cloud.einsatzleitwagen.app').replace(/\/$/, '');
 const displayName = (a: Account) => a.name || a.email;
 
@@ -70,7 +83,7 @@ async function currentAccount(req: Request, db: D1Database, now: Date): Promise<
   const token = cookieToken(req);
   if (!token) return null;
   const row = await db
-    .prepare('SELECT a.id, a.email, a.name, a.operator FROM account_sessions s JOIN accounts a ON a.id = s.account_id WHERE s.token_hash = ? AND s.expires_at > ?')
+    .prepare('SELECT a.id, a.email, a.name, a.operator FROM account_sessions s JOIN accounts a ON a.id = s.account_id WHERE s.token_hash = ? AND s.expires_at > ? AND a.disabled_at IS NULL')
     .bind(await hash(token), now.toISOString())
     .first<AccountRow>();
   return row ? toAccount(row) : null;
@@ -145,6 +158,21 @@ async function invitationInfo(db: D1Database, row: { email: string; node_id: str
  * Portal-API unter /v1/cloud. Anmeldung per Code an die E-Mail-Adresse (legt beim ersten Mal das Konto an), Sitzung als
  * HttpOnly-Cookie (SameSite=Strict). Ändernde Aufrufe verlangen JSON und, falls der Browser sie schickt, die eigene Origin.
  */
+/** Bereiche, die das Konto als einziger Admin verwaltet (auch über darüberliegende Knoten hat sonst niemand Verwalten) */
+async function soleAdminOf(db: D1Database, accountId: string): Promise<string[]> {
+  const own = await db.prepare("SELECT m.node_id, n.name FROM memberships m JOIN nodes n ON n.id = m.node_id WHERE m.account_id = ? AND m.role = 'admin'").bind(accountId).all<{ node_id: string; name: string }>();
+  const out: string[] = [];
+  for (const r of own.results) {
+    let others = 0;
+    for (let id: string | null = r.node_id; id && !others; ) {
+      others = (await db.prepare("SELECT COUNT(*) AS n FROM memberships WHERE node_id = ? AND role = 'admin' AND account_id != ?").bind(id, accountId).first<{ n: number }>())?.n ?? 0;
+      id = (await db.prepare('SELECT parent_id FROM nodes WHERE id = ?').bind(id).first<{ parent_id: string | null }>())?.parent_id ?? null;
+    }
+    if (!others) out.push(r.name || 'Deutschland');
+  }
+  return out;
+}
+
 export async function handlePortal(req: Request, env: Env, path: string, url: URL, now: Date): Promise<Response> {
   const db = env.DB;
   const ts = now.toISOString();
@@ -157,52 +185,176 @@ export async function handlePortal(req: Request, env: Env, path: string, url: UR
     if (req.method !== 'DELETE' && !upload && !(req.headers.get('content-type') ?? '').includes('application/json')) return fail(415, 'JSON erwartet');
   }
 
-  // --- Anmeldung ---
+  // --- Konto: registrieren, bestätigen, anmelden, Passwort vergessen (ohne Sitzung) ---
 
-  if (req.method === 'POST' && path === '/v1/cloud/login') {
-    const parsed = loginRequestSchema.safeParse(await body(req));
-    if (!parsed.success) return fail(400, 'E-Mail-Adresse ungültig');
-    const email = parsed.data.email;
+  /** Mails je Adresse begrenzen (Bestätigung, Zurücksetzen); false = Kontingent erschöpft */
+  const mailBudget = async (email: string) => {
     const sent = await db.prepare('SELECT COUNT(*) AS n FROM login_mails WHERE email = ? AND sent_at > ?').bind(email, ago(now, 3600_000)).first<{ n: number }>();
-    if ((sent?.n ?? 0) >= LOGIN_MAILS_PER_HOUR) return fail(429, 'Zu viele Codes angefordert, bitte später erneut versuchen');
-    const code = newLoginCode();
-    await db
-      .prepare('INSERT INTO login_codes (email, code_hash, attempts, expires_at) VALUES (?, ?, 0, ?) ON CONFLICT(email) DO UPDATE SET code_hash = excluded.code_hash, attempts = 0, expires_at = excluded.expires_at')
-      .bind(email, await hash(`${email}:${code}`), later(now, LOGIN_CODE_TTL_MS))
-      .run();
+    if ((sent?.n ?? 0) >= ACCOUNT_MAILS_PER_HOUR) return false;
     await db.prepare('INSERT INTO login_mails (email, sent_at) VALUES (?, ?)').bind(email, ts).run();
-    const ok = await mail(
+    return true;
+  };
+  /** Einmal-Link anlegen (ersetzt offene Links desselben Zwecks) */
+  const issueToken = async (accountId: string, purpose: 'verify' | 'reset' | 'email', ttlMs: number, newEmail: string | null = null) => {
+    const token = newToken();
+    await db.prepare('DELETE FROM account_tokens WHERE account_id = ? AND purpose = ?').bind(accountId, purpose).run();
+    await db
+      .prepare('INSERT INTO account_tokens (token_hash, account_id, purpose, new_email, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .bind(await hash(token), accountId, purpose, newEmail, ts, later(now, ttlMs))
+      .run();
+    return token;
+  };
+  /** Einmal-Link einlösen: gültig, Zweck passt; wird dabei verbraucht */
+  const redeemToken = async (token: string, purpose: 'verify' | 'reset' | 'email') => {
+    const h = await hash(token);
+    const row = await db.prepare('SELECT * FROM account_tokens WHERE token_hash = ? AND purpose = ?').bind(h, purpose).first<{ account_id: string; new_email: string | null; expires_at: string }>();
+    if (!row) return null;
+    await db.prepare('DELETE FROM account_tokens WHERE token_hash = ?').bind(h).run();
+    return row.expires_at > ts ? row : null;
+  };
+  const DISABLED = 'Dieses Konto ist gesperrt – bitte an den Betreiber von ELVIS Cloud wenden';
+  const startSession = async (account: AccountRow, extra: Record<string, string> = {}) => {
+    // Gesperrte Konten bekommen keine Sitzung (auch nicht über Bestätigungs- oder Passwort-Link)
+    if (await db.prepare('SELECT 1 FROM accounts WHERE id = ? AND disabled_at IS NOT NULL').bind(account.id).first()) return fail(423, DISABLED);
+    await db.prepare('UPDATE accounts SET last_login_at = ?, failed_logins = 0, locked_until = NULL WHERE id = ?').bind(ts, account.id).run();
+    const token = newToken();
+    await db.prepare('INSERT INTO account_sessions (token_hash, account_id, created_at, expires_at) VALUES (?, ?, ?, ?)').bind(await hash(token), account.id, ts, later(now, SESSION_TTL_MS)).run();
+    return json(200, await me(db, toAccount(account)), { 'set-cookie': sessionCookie(token, SESSION_TTL_MS / 1000), ...extra });
+  };
+  const sendVerify = async (account: { id: string; email: string; name: string }) => {
+    const token = await issueToken(account.id, 'verify', VERIFY_TTL_MS);
+    return mail(
       env,
-      email,
-      `ELVIS Cloud: Anmeldecode ${code}`,
-      `Hallo,\n\nIhr Code für die Anmeldung bei ELVIS Cloud (${cloudUrl(env)}):\n\n  ${code}\n\nEr gilt 15 Minuten. Wenn Sie sich nicht anmelden wollten, ignorieren Sie diese Mail.\n\nELVIS Cloud`,
+      account.email,
+      'ELVIS Cloud: E-Mail-Adresse bestätigen',
+      `Hallo${account.name ? ` ${account.name}` : ''},\n\nbitte bestätigen Sie Ihre E-Mail-Adresse für ELVIS Cloud (gültig 24 Stunden):\n\n  ${cloudUrl(env)}/bestaetigen/${token}\n\nWenn Sie kein Konto angelegt haben, ignorieren Sie diese Mail.\n\nELVIS Cloud`,
     );
-    if (!ok) return fail(503, 'Mailversand ist auf diesem Relay nicht eingerichtet');
+  };
+  const sendReset = async (account: { id: string; email: string; name: string }) => {
+    const token = await issueToken(account.id, 'reset', RESET_TTL_MS);
+    return mail(
+      env,
+      account.email,
+      'ELVIS Cloud: Passwort zurücksetzen',
+      `Hallo${account.name ? ` ${account.name}` : ''},\n\nüber diesen Link legen Sie ein neues Passwort für ELVIS Cloud fest (gültig 1 Stunde):\n\n  ${cloudUrl(env)}/passwort-zuruecksetzen/${token}\n\nDanach sind Sie überall abgemeldet. Wenn Sie das nicht angefordert haben, ignorieren Sie diese Mail – Ihr Passwort bleibt dann unverändert.\n\nELVIS Cloud`,
+    );
+  };
+  const ACCOUNT_SELECT = 'SELECT id, email, name, operator, password_hash, email_verified_at, failed_logins, locked_until, disabled_at FROM accounts';
+  type AuthRow = AccountRow & { password_hash: string | null; email_verified_at: string | null; failed_logins: number; locked_until: string | null; disabled_at: string | null };
+
+  if (req.method === 'POST' && path === '/v1/cloud/register') {
+    const parsed = registerSchema.safeParse(await body(req));
+    if (!parsed.success) return fail(400, parsed.error.issues[0]?.message ?? 'Eingabe ungültig');
+    const { email, name, password, invitation } = parsed.data;
+    if (password.toLowerCase() === email) return fail(400, 'Passwort darf nicht die E-Mail-Adresse sein');
+    // Mit Einladung an genau diese Adresse ist sie bestätigt (der Link kam per Mail an sie)
+    const invited = invitation
+      ? await db.prepare('SELECT email, expires_at, accepted_at FROM invitations WHERE token_hash = ?').bind(await hash(invitation)).first<{ email: string; expires_at: string; accepted_at: string | null }>()
+      : null;
+    const viaInvitation = !!invited && invited.email === email && !invited.accepted_at && invited.expires_at > ts;
+    const existing = await db.prepare(`${ACCOUNT_SELECT} WHERE email = ?`).bind(email).first<AuthRow>();
+    if (existing) {
+      // Ob es die Adresse schon gibt, verrät die Antwort nicht – die Mail an die Adresse schon
+      if (await mailBudget(email)) {
+        await mail(
+          env,
+          email,
+          'ELVIS Cloud: Konto besteht bereits',
+          `Hallo,\n\nfür ${email} gibt es schon ein Konto bei ELVIS Cloud. Zum Anmelden: ${cloudUrl(env)}\nPasswort vergessen? Dort „Passwort vergessen“ wählen.\n\nWenn Sie das nicht waren, ignorieren Sie diese Mail.\n\nELVIS Cloud`,
+        );
+      }
+      return json(202, { verify: true });
+    }
+    const id = crypto.randomUUID();
+    await db
+      .prepare('INSERT INTO accounts (id, email, name, created_at, password_hash, password_changed_at, email_verified_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .bind(id, email, name, ts, await hashPassword(password), ts, viaInvitation ? ts : null)
+      .run();
+    const account: AccountRow = { id, email, name, operator: 0 };
+    if (viaInvitation) return startSession(account);
+    if (!(await mailBudget(email)) || !(await sendVerify(account))) return fail(503, 'Bestätigungsmail konnte nicht gesendet werden, bitte später erneut versuchen');
+    return json(202, { verify: true });
+  }
+
+  if (req.method === 'POST' && path === '/v1/cloud/verify') {
+    const parsed = linkTokenSchema.safeParse(await body(req));
+    if (!parsed.success) return fail(400, 'Link ungültig');
+    const t = await redeemToken(parsed.data.token, 'verify');
+    if (!t) return fail(410, 'Link abgelaufen oder schon benutzt – beim Anmelden lässt sich ein neuer anfordern');
+    await db.prepare('UPDATE accounts SET email_verified_at = COALESCE(email_verified_at, ?) WHERE id = ?').bind(ts, t.account_id).run();
+    const account = await db.prepare(`${ACCOUNT_SELECT} WHERE id = ?`).bind(t.account_id).first<AuthRow>();
+    return account ? startSession(account) : fail(404, 'Konto nicht gefunden');
+  }
+
+  if (req.method === 'POST' && path === '/v1/cloud/verify/resend') {
+    const parsed = emailOnlySchema.safeParse(await body(req));
+    if (!parsed.success) return fail(400, 'E-Mail-Adresse ungültig');
+    const account = await db.prepare(`${ACCOUNT_SELECT} WHERE email = ?`).bind(parsed.data.email).first<AuthRow>();
+    if (account && !account.email_verified_at && (await mailBudget(account.email))) await sendVerify(account);
     return json(202, { ok: true });
   }
 
-  if (req.method === 'POST' && path === '/v1/cloud/login/verify') {
-    const parsed = loginVerifySchema.safeParse(await body(req));
+  if (req.method === 'POST' && path === '/v1/cloud/login') {
+    const parsed = loginSchema.safeParse(await body(req));
     if (!parsed.success) return fail(400, parsed.error.issues[0]?.message ?? 'Eingabe ungültig');
-    const { email, code, name } = parsed.data;
-    const row = await db.prepare('SELECT code_hash, attempts, expires_at FROM login_codes WHERE email = ?').bind(email).first<{ code_hash: string; attempts: number; expires_at: string }>();
-    if (!row || row.expires_at <= ts) return fail(401, 'Code abgelaufen, bitte neu anfordern');
-    if (row.attempts >= LOGIN_MAX_ATTEMPTS) return fail(429, 'Zu viele Fehlversuche, bitte neuen Code anfordern');
-    if (!sameCode(row.code_hash, await hash(`${email}:${code}`))) {
-      await db.prepare('UPDATE login_codes SET attempts = attempts + 1 WHERE email = ?').bind(email).run();
-      return fail(401, 'Code falsch');
+    const { email, password } = parsed.data;
+    const account = await db.prepare(`${ACCOUNT_SELECT} WHERE email = ?`).bind(email).first<AuthRow>();
+    if (account?.locked_until && account.locked_until > ts) return fail(429, 'Zu viele Fehlversuche – bitte in 15 Minuten erneut versuchen oder das Passwort zurücksetzen');
+    const ok = await verifyPassword(password, account?.password_hash ?? null);
+    if (!account || !ok) {
+      if (account) {
+        const failures = account.failed_logins + 1;
+        await db
+          .prepare('UPDATE accounts SET failed_logins = ?, locked_until = ? WHERE id = ?')
+          .bind(failures >= LOGIN_MAX_FAILURES ? 0 : failures, failures >= LOGIN_MAX_FAILURES ? later(now, LOGIN_LOCK_MS) : null, account.id)
+          .run();
+      }
+      return fail(401, 'E-Mail-Adresse oder Passwort falsch');
     }
-    await db.prepare('DELETE FROM login_codes WHERE email = ?').bind(email).run();
-    let account = await db.prepare('SELECT id, email, name, operator FROM accounts WHERE email = ?').bind(email).first<AccountRow>();
-    if (!account) {
-      const id = crypto.randomUUID();
-      await db.prepare('INSERT INTO accounts (id, email, name, created_at) VALUES (?, ?, ?, ?)').bind(id, email, name ?? '', ts).run();
-      account = { id, email, name: name ?? '', operator: 0 };
-    }
-    await db.prepare('UPDATE accounts SET last_login_at = ? WHERE id = ?').bind(ts, account.id).run();
-    const token = newToken();
-    await db.prepare('INSERT INTO account_sessions (token_hash, account_id, created_at, expires_at) VALUES (?, ?, ?, ?)').bind(await hash(token), account.id, ts, later(now, SESSION_TTL_MS)).run();
-    return json(200, await me(db, toAccount(account)), { 'set-cookie': sessionCookie(token, SESSION_TTL_MS / 1000) });
+    if (account.disabled_at) return fail(423, DISABLED);
+    if (!account.email_verified_at) return fail(403, 'Bitte zuerst die E-Mail-Adresse über den Link in der Bestätigungsmail bestätigen');
+    return startSession(account);
+  }
+
+  if (req.method === 'POST' && path === '/v1/cloud/password/forgot') {
+    const parsed = emailOnlySchema.safeParse(await body(req));
+    if (!parsed.success) return fail(400, 'E-Mail-Adresse ungültig');
+    // Antwort immer gleich – ob es das Konto gibt, erfährt nur das Postfach
+    const account = await db.prepare(`${ACCOUNT_SELECT} WHERE email = ?`).bind(parsed.data.email).first<AuthRow>();
+    if (account && !account.disabled_at && (await mailBudget(account.email))) await sendReset(account);
+    return json(202, { ok: true });
+  }
+
+  if (req.method === 'POST' && path === '/v1/cloud/password/reset') {
+    const parsed = resetPasswordSchema.safeParse(await body(req));
+    if (!parsed.success) return fail(400, parsed.error.issues[0]?.message ?? 'Eingabe ungültig');
+    const t = await redeemToken(parsed.data.token, 'reset');
+    if (!t) return fail(410, 'Link abgelaufen oder schon benutzt – bitte neu anfordern');
+    const account = await db.prepare(`${ACCOUNT_SELECT} WHERE id = ?`).bind(t.account_id).first<AuthRow>();
+    if (!account) return fail(404, 'Konto nicht gefunden');
+    if (parsed.data.password.toLowerCase() === account.email) return fail(400, 'Passwort darf nicht die E-Mail-Adresse sein');
+    // Neues Passwort: alle Sitzungen enden; der Link kam an die Adresse, sie gilt damit als bestätigt
+    await db
+      .prepare('UPDATE accounts SET password_hash = ?, password_changed_at = ?, email_verified_at = COALESCE(email_verified_at, ?) WHERE id = ?')
+      .bind(await hashPassword(parsed.data.password), ts, ts, account.id)
+      .run();
+    await db.prepare('DELETE FROM account_sessions WHERE account_id = ?').bind(account.id).run();
+    await db.prepare("DELETE FROM account_tokens WHERE account_id = ? AND purpose = 'reset'").bind(account.id).run();
+    return startSession(account);
+  }
+
+  // Neue E-Mail-Adresse bestätigen (Link an die neue Adresse; geht auch ohne Sitzung)
+  if (req.method === 'POST' && path === '/v1/cloud/email/confirm') {
+    const parsed = linkTokenSchema.safeParse(await body(req));
+    if (!parsed.success) return fail(400, 'Link ungültig');
+    const t = await redeemToken(parsed.data.token, 'email');
+    if (!t?.new_email) return fail(410, 'Link abgelaufen oder schon benutzt');
+    if (await db.prepare('SELECT 1 FROM accounts WHERE email = ?').bind(t.new_email).first()) return fail(409, 'Diese Adresse gehört inzwischen zu einem anderen Konto');
+    const before = await db.prepare(`${ACCOUNT_SELECT} WHERE id = ?`).bind(t.account_id).first<AuthRow>();
+    if (!before) return fail(404, 'Konto nicht gefunden');
+    await db.prepare('UPDATE accounts SET email = ?, email_verified_at = ? WHERE id = ?').bind(t.new_email, ts, before.id).run();
+    await mail(env, before.email, 'ELVIS Cloud: E-Mail-Adresse geändert', `Hallo,\n\ndie Adresse Ihres Kontos bei ELVIS Cloud wurde von ${before.email} auf ${t.new_email} geändert.\nWaren Sie das nicht? Bitte wenden Sie sich an den Betreiber.\n\nELVIS Cloud`);
+    return json(200, { email: t.new_email });
   }
 
   // Einladung ansehen geht ohne Anmeldung (der Link ist der Zugang)
@@ -220,6 +372,60 @@ export async function handlePortal(req: Request, env: Env, path: string, url: UR
     if (token) await db.prepare('DELETE FROM account_sessions WHERE token_hash = ?').bind(await hash(token)).run();
     return json(204, null, { 'set-cookie': sessionCookie('', 0) });
   }
+  // Überall abmelden außer hier (z. B. nach verlorenem Gerät)
+  if (req.method === 'POST' && path === '/v1/cloud/logout/others') {
+    const token = cookieToken(req);
+    const r = await db.prepare('DELETE FROM account_sessions WHERE account_id = ? AND token_hash != ?').bind(account.id, await hash(token ?? '')).run();
+    return json(200, { ended: r.meta.changes });
+  }
+  const checkPassword = async (password: string) => {
+    const row = await db.prepare('SELECT password_hash FROM accounts WHERE id = ?').bind(account.id).first<{ password_hash: string | null }>();
+    return verifyPassword(password, row?.password_hash ?? null);
+  };
+  if (req.method === 'POST' && path === '/v1/cloud/password') {
+    const parsed = changePasswordSchema.safeParse(await body(req));
+    if (!parsed.success) return fail(400, parsed.error.issues[0]?.message ?? 'Eingabe ungültig');
+    if (!(await checkPassword(parsed.data.current))) return fail(403, 'Aktuelles Passwort falsch');
+    if (parsed.data.password.toLowerCase() === account.email) return fail(400, 'Passwort darf nicht die E-Mail-Adresse sein');
+    await db.prepare('UPDATE accounts SET password_hash = ?, password_changed_at = ? WHERE id = ?').bind(await hashPassword(parsed.data.password), ts, account.id).run();
+    // Andere Sitzungen enden, diese bleibt
+    await db.prepare('DELETE FROM account_sessions WHERE account_id = ? AND token_hash != ?').bind(account.id, await hash(cookieToken(req) ?? '')).run();
+    await mail(env, account.email, 'ELVIS Cloud: Passwort geändert', `Hallo,
+
+das Passwort Ihres Kontos bei ELVIS Cloud wurde geändert. Andere Anmeldungen wurden beendet.
+Waren Sie das nicht? Setzen Sie es über „Passwort vergessen“ zurück: ${cloudUrl(env)}
+
+ELVIS Cloud`);
+    return json(200, { ok: true });
+  }
+  if (req.method === 'POST' && path === '/v1/cloud/email') {
+    const parsed = changeEmailSchema.safeParse(await body(req));
+    if (!parsed.success) return fail(400, parsed.error.issues[0]?.message ?? 'Eingabe ungültig');
+    if (!(await checkPassword(parsed.data.password))) return fail(403, 'Passwort falsch');
+    const next = parsed.data.email;
+    if (next === account.email) return fail(400, 'Das ist schon Ihre Adresse');
+    // Belegte Adressen verrät die Antwort nicht – der Bestätigungslink scheitert dann
+    if (!(await mailBudget(next))) return fail(429, 'Zu viele Mails an diese Adresse, bitte später erneut versuchen');
+    if (!(await db.prepare('SELECT 1 FROM accounts WHERE email = ?').bind(next).first())) {
+      const token = await issueToken(account.id, 'email', VERIFY_TTL_MS, next);
+      const sent = await mail(
+        env,
+        next,
+        'ELVIS Cloud: neue E-Mail-Adresse bestätigen',
+        `Hallo,
+
+bitte bestätigen Sie ${next} als neue Adresse Ihres Kontos bei ELVIS Cloud (gültig 24 Stunden):
+
+  ${cloudUrl(env)}/email-bestaetigen/${token}
+
+Bis dahin gilt die bisherige Adresse. Wenn Sie das nicht angefordert haben, ignorieren Sie diese Mail.
+
+ELVIS Cloud`,
+      );
+      if (!sent) return fail(503, 'Mail konnte nicht gesendet werden');
+    }
+    return json(202, { email: next });
+  }
   if (path === '/v1/cloud/me') {
     if (req.method === 'GET') return json(200, await me(db, account));
     if (req.method === 'PATCH') {
@@ -227,6 +433,16 @@ export async function handlePortal(req: Request, env: Env, path: string, url: UR
       if (!parsed.success) return fail(400, 'Name ungültig');
       await db.prepare('UPDATE accounts SET name = ? WHERE id = ?').bind(parsed.data.name, account.id).run();
       return json(200, await me(db, { ...account, name: parsed.data.name }));
+    }
+    if (req.method === 'DELETE') {
+      const parsed = deleteAccountSchema.safeParse(await body(req));
+      if (!parsed.success) return fail(400, 'Passwort fehlt');
+      if (!(await checkPassword(parsed.data.password))) return fail(403, 'Passwort falsch');
+      // Ein Bereich soll nicht ohne Verwaltung zurückbleiben
+      const orphaned = await soleAdminOf(db, account.id);
+      if (orphaned.length) return fail(409, `Sie verwalten ${orphaned.join(', ')} allein – bitte zuerst jemand anderen als Admin einsetzen`);
+      await db.prepare('DELETE FROM accounts WHERE id = ?').bind(account.id).run();
+      return json(204, null, { 'set-cookie': sessionCookie('', 0) });
     }
   }
 
@@ -245,6 +461,116 @@ export async function handlePortal(req: Request, env: Env, path: string, url: UR
     }
     await db.prepare('UPDATE invitations SET accepted_at = ? WHERE id = ?').bind(ts, row.id).run();
     return json(200, await me(db, account));
+  }
+
+  // --- Verwaltung: alle Konten der Plattform (nur Betreiber) ---
+
+  if (path === '/v1/cloud/admin' || path.startsWith('/v1/cloud/admin/')) {
+    if (!account.operator) return fail(403, 'Nur für Betreiber');
+    const log = (target: string, action: AdminAction, detail = '') => logAdmin(db, ts, account.email, target, action, detail);
+    if (req.method === 'GET' && path === '/v1/cloud/admin') {
+      return json(200, { accounts: await adminAccounts(db, now, url.searchParams.get('q') ?? ''), nodes: await allNodes(db) } satisfies AdminOverview);
+    }
+    if (req.method === 'GET' && path === '/v1/cloud/admin/log') return json(200, await adminLog(db));
+
+    const m = /^\/v1\/cloud\/admin\/accounts\/([0-9A-Za-z-]{1,40})(?:\/(reset-link|verify|unlock|logout|membership))?$/.exec(path);
+    if (!m) return fail(404, 'Nicht gefunden');
+    const target = await db.prepare('SELECT id, email, name, operator, disabled_at FROM accounts WHERE id = ?').bind(m[1]).first<AccountRow & { disabled_at: string | null }>();
+    if (!target) return fail(404, 'Konto nicht gefunden');
+    const self = target.id === account.id;
+    const activeOperators = async () => (await db.prepare('SELECT COUNT(*) AS n FROM accounts WHERE operator = 1 AND disabled_at IS NULL').first<{ n: number }>())?.n ?? 0;
+    const result = async () => json(200, (await adminAccounts(db, now)).find((a) => a.id === target.id) ?? null);
+    const action = m[2];
+
+    if (!action && req.method === 'PATCH') {
+      const parsed = adminAccountPatchSchema.safeParse(await body(req));
+      if (!parsed.success) return fail(400, parsed.error.issues[0]?.message ?? 'Eingabe ungültig');
+      const p = parsed.data;
+      if (self && (p.operator === false || p.disabled === true)) return fail(409, 'Sich selbst sperren oder entmachten geht nicht');
+      if (target.operator === 1 && (p.operator === false || p.disabled === true) && (await activeOperators()) <= 1) return fail(409, 'Es muss mindestens einen aktiven Betreiber geben');
+      if (p.email && p.email !== target.email) {
+        if (await db.prepare('SELECT 1 FROM accounts WHERE email = ?').bind(p.email).first()) return fail(409, 'Diese Adresse gehört schon zu einem anderen Konto');
+        // Vom Betreiber gesetzt: gilt als bestätigt; die alte Adresse erfährt es
+        await db.prepare('UPDATE accounts SET email = ?, email_verified_at = ? WHERE id = ?').bind(p.email, ts, target.id).run();
+        await db.prepare("DELETE FROM account_tokens WHERE account_id = ? AND purpose = 'email'").bind(target.id).run();
+        await mail(env, target.email, 'ELVIS Cloud: E-Mail-Adresse geändert', `Hallo,\n\nder Betreiber von ELVIS Cloud hat die Adresse Ihres Kontos von ${target.email} auf ${p.email} geändert.\n\nELVIS Cloud`);
+        await log(target.email, 'edit', `E-Mail → ${p.email}`);
+      }
+      if (p.name !== undefined && p.name !== target.name) {
+        await db.prepare('UPDATE accounts SET name = ? WHERE id = ?').bind(p.name, target.id).run();
+        await log(p.email ?? target.email, 'edit', `Name → ${p.name}`);
+      }
+      if (p.operator !== undefined && p.operator !== (target.operator === 1)) {
+        await db.prepare('UPDATE accounts SET operator = ? WHERE id = ?').bind(p.operator ? 1 : 0, target.id).run();
+        await log(p.email ?? target.email, 'operator', p.operator ? 'zum Betreiber ernannt' : 'Betreiber-Recht entzogen');
+      }
+      if (p.disabled !== undefined && p.disabled !== !!target.disabled_at) {
+        if (p.disabled) {
+          await db.prepare('UPDATE accounts SET disabled_at = ?, disabled_by = ? WHERE id = ?').bind(ts, account.email, target.id).run();
+          await db.prepare('DELETE FROM account_sessions WHERE account_id = ?').bind(target.id).run();
+          await log(p.email ?? target.email, 'disable', 'gesperrt, Anmeldungen beendet');
+        } else {
+          await db.prepare('UPDATE accounts SET disabled_at = NULL, disabled_by = NULL WHERE id = ?').bind(target.id).run();
+          await log(p.email ?? target.email, 'enable', 'entsperrt');
+        }
+      }
+      return result();
+    }
+
+    if (!action && req.method === 'DELETE') {
+      if (self) return fail(409, 'Das eigene Konto unter „Mein Konto“ löschen');
+      if (target.operator === 1 && (await activeOperators()) <= 1) return fail(409, 'Es muss mindestens einen aktiven Betreiber geben');
+      const orphaned = await soleAdminOf(db, target.id);
+      if (orphaned.length) return fail(409, `${target.email} verwaltet ${orphaned.join(', ')} allein – erst jemand anderen als Admin einsetzen`);
+      await db.prepare('DELETE FROM accounts WHERE id = ?').bind(target.id).run();
+      await log(target.email, 'delete', target.name);
+      return json(204, null);
+    }
+
+    if (req.method === 'POST' && action === 'reset-link') {
+      if (target.disabled_at) return fail(409, 'Konto ist gesperrt – erst entsperren');
+      if (!(await sendReset(target))) return fail(503, 'Mail konnte nicht gesendet werden');
+      await log(target.email, 'reset-link', 'Link zum Zurücksetzen gesendet');
+      return result();
+    }
+    if (req.method === 'POST' && action === 'verify') {
+      await db.prepare('UPDATE accounts SET email_verified_at = COALESCE(email_verified_at, ?) WHERE id = ?').bind(ts, target.id).run();
+      await db.prepare("DELETE FROM account_tokens WHERE account_id = ? AND purpose = 'verify'").bind(target.id).run();
+      await log(target.email, 'verify', 'Adresse als bestätigt markiert');
+      return result();
+    }
+    if (req.method === 'POST' && action === 'unlock') {
+      await db.prepare('UPDATE accounts SET failed_logins = 0, locked_until = NULL WHERE id = ?').bind(target.id).run();
+      await log(target.email, 'unlock', 'Sperre nach Fehlversuchen aufgehoben');
+      return result();
+    }
+    if (req.method === 'POST' && action === 'logout') {
+      const r = await db.prepare('DELETE FROM account_sessions WHERE account_id = ?').bind(target.id).run();
+      await log(target.email, 'logout', `${r.meta.changes} Anmeldungen beendet`);
+      return result();
+    }
+    if (req.method === 'PUT' && action === 'membership') {
+      const parsed = adminMembershipSchema.safeParse(await body(req));
+      if (!parsed.success) return fail(400, 'Eingabe ungültig');
+      const { nodeId, role } = parsed.data;
+      const node = await nodeRef(db, nodeId);
+      if (!node) return fail(404, 'Knoten nicht gefunden');
+      const where = node.path.join(' › ') || 'Deutschland';
+      if (role === null) {
+        // Der letzte Admin eines Bereichs bleibt (sonst verwaltet ihn nur noch der Betreiber)
+        const res = await db.prepare('DELETE FROM memberships WHERE account_id = ? AND node_id = ?').bind(target.id, nodeId).run();
+        if (!res.meta.changes) return fail(404, 'Keine Rolle an diesem Knoten');
+        await log(target.email, 'role', `${where}: Rolle entzogen`);
+      } else {
+        await db
+          .prepare('INSERT INTO memberships (account_id, node_id, role, created_at, created_by) VALUES (?, ?, ?, ?, ?) ON CONFLICT(account_id, node_id) DO UPDATE SET role = excluded.role')
+          .bind(target.id, nodeId, role, ts, account.email)
+          .run();
+        await log(target.email, 'role', `${where}: ${CLOUD_ROLE_LABELS[role]}`);
+      }
+      return result();
+    }
+    return fail(405, 'Nicht erlaubt');
   }
 
   // --- Stammdaten ---
@@ -518,7 +844,9 @@ export async function handlePortal(req: Request, env: Env, path: string, url: UR
 /** Stündlich: abgelaufene Codes, Sitzungen, Einladungen und Verknüpfungsanfragen */
 export async function cloudCleanup(env: Env, now: Date): Promise<void> {
   const ts = now.toISOString();
-  await env.DB.prepare('DELETE FROM login_codes WHERE expires_at < ?').bind(ts).run();
+  await env.DB.prepare('DELETE FROM account_tokens WHERE expires_at < ?').bind(ts).run();
+  // Protokoll der Verwaltung: zwei Jahre
+  await env.DB.prepare('DELETE FROM admin_log WHERE at < ?').bind(ago(now, 2 * 365 * 24 * 3600_000)).run();
   await env.DB.prepare('DELETE FROM login_mails WHERE sent_at < ?').bind(ago(now, 3600_000)).run();
   await env.DB.prepare('DELETE FROM account_sessions WHERE expires_at < ?').bind(ts).run();
   await env.DB.prepare('DELETE FROM invitations WHERE expires_at < ? AND accepted_at IS NULL').bind(ago(now, 30 * 24 * 3600_000)).run();

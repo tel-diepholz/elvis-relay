@@ -41,12 +41,6 @@ const keyOf = (label: string, taken: string[]) => {
 
 const fmtValue = (f: Field, v: unknown) => (v === undefined || v === '' ? '' : f.type === 'bool' ? (v ? 'ja' : 'nein') : `${String(v)}${f.unit ? ` ${f.unit}` : ''}`);
 
-/**
- * OSM-Kacheln: tile.openstreetmap.org verlangt einen Referer (sonst 403 „Access blocked“). Die Seite selbst sendet
- * keinen (no-referrer, Tokens stehen in Links); nur die Kacheln bekommen die Origin des Portals.
- */
-const OsmTiles = () => <TileLayer url="https://tile.openstreetmap.org/{z}/{x}/{y}.png" attribution="© OpenStreetMap-Mitwirkende" maxZoom={19} referrerPolicy="strict-origin" />;
-
 const sha256 = async (buf: ArrayBuffer) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', buf))].map((b) => b.toString(16).padStart(2, '0')).join('');
 
 function Labeled({ label, children }: { label: string; children: ReactNode }) {

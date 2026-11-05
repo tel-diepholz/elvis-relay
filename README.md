@@ -165,9 +165,32 @@ und der Zustand der Cloud-Module verknüpfter ELVIS-Installationen. Die Oberflä
 derselbe Worker als Static Assets aus (`[assets]` in `wrangler.toml`, nur unter der Portal-Adresse), die API liegt
 unter `/v1/cloud` (`src/cloud/portal.ts`), Protokoll in `src/cloudprotocol.ts`.
 
-- **Anmelden:** per Code an die E-Mail-Adresse (6 Ziffern, 15 Minuten, 5 Versuche, 5 Codes je Stunde), beim ersten Mal
-  entsteht das Konto. Es gibt keine Passwörter. Die Sitzung ist ein Cookie `elvis_cloud` (HttpOnly, Secure,
-  SameSite=Strict, 30 Tage). Ändernde Aufrufe verlangen JSON und, wenn der Browser sie schickt, die eigene Origin.
+- **Konto:** E-Mail-Adresse und Passwort (mindestens 10 Zeichen, PBKDF2-SHA256 mit 100.000 Runden und Salz je Konto).
+  - *Registrieren:* Danach kommt ein Bestätigungslink (24 Stunden). Erst danach ist eine Anmeldung möglich. Mit einer
+    Einladung an genau diese Adresse ist sie sofort bestätigt.
+  - *Anmelden:* Nach 5 falschen Passwörtern ist das Konto 15 Minuten gesperrt. Antworten und Mails verraten nicht, ob es
+    eine Adresse schon gibt.
+  - *Passwort vergessen:* Ein Link (1 Stunde) setzt ein neues Passwort und beendet alle Sitzungen. So setzen auch Konten
+    aus der Zeit der Anmeldecodes ihr erstes Passwort.
+  - *Im Konto (`/konto`):* Passwort ändern (beendet die anderen Sitzungen, Hinweis per Mail), E-Mail-Adresse ändern (gilt
+    erst nach Bestätigung an die neue Adresse, Hinweis an die alte), überall sonst abmelden, Konto löschen. Wer einen
+    Bereich als einziger verwaltet, kann sein Konto nicht löschen.
+  - *Mails:* höchstens 5 je Adresse und Stunde. Links sind einmalig und nur als Hash gespeichert.
+- **Verwaltung (`/verwaltung`, nur Betreiber):** alle Konten mit Status (Betreiber, gesperrt, unbestätigt, ohne
+  Passwort, Fehlversuch-Sperre), letzter Anmeldung, aktiven Sitzungen und Rollen. Betreiber können:
+  - Name und E-Mail-Adresse ändern (die alte Adresse bekommt einen Hinweis),
+  - Betreiber ernennen oder entziehen,
+  - sperren (beendet alle Sitzungen, keine Anmeldung und kein Passwort-Link mehr) und entsperren,
+  - einen Link zum Zurücksetzen senden, die Adresse als bestätigt markieren, die Fehlversuch-Sperre aufheben,
+  - überall abmelden, löschen,
+  - Rollen in beliebigen Bereichen vergeben und entziehen.
+
+  Niemand kann sich selbst sperren oder entmachten, und es bleibt immer mindestens ein aktiver Betreiber. Alles steht im
+  Protokoll (`admin_log`, zwei Jahre). Den **ersten Betreiber** setzt man einmal von Hand:
+  `npx wrangler d1 execute elvis-relay --remote --command "UPDATE accounts SET operator = 1 WHERE email = 'name@example.org'"`.
+  Weitere ernennt er dann in der Verwaltung.
+- **Sitzung:** Cookie `elvis_cloud` (HttpOnly, Secure, SameSite=Strict, 30 Tage). Ändernde Aufrufe verlangen JSON und,
+  wenn der Browser sie schickt, die eigene Origin.
 - **Baustruktur:** Gebietskörperschaften nach dem Amtlichen Regionalschlüssel (Knoten `ars:<ARS>`, aus dem
   Kommunen-Katalog, entstehen bei Bedarf), darunter frei angelegte Knoten (z. B. Ortsfeuerwehr). Rollen *Lesen*,
   *Pflegen* und *Verwalten* gelten für den Knoten und alles darunter: Wer den Landkreis verwaltet, verwaltet auch jede
@@ -246,7 +269,8 @@ Knoten und hat eine Revision. `seq` ist der Änderungszähler, Gelöschtes bleib
   löscht es nach 14 Tagen, Verzeichniseinträge ohne aktives Postfach beim nächsten Aufräumen. Den Verzeichniseintrag
   (Fahrzeug, Kontaktdaten, Gebiet) sehen alle registrierten Installationen.
 - Cloud-Zugang: Das Relay speichert E-Mail-Adresse und Namen der Konten, Rollen, Einladungen und Namen der verknüpften
-  Installationen. Anmeldecodes und Sitzungen nur als Hash, Codes 15 Minuten, Sitzungen 30 Tage.
+  Installationen. Passwörter nur als PBKDF2-Hash, Links aus Mails und Sitzungen nur als Hash; Links gelten 1 bzw. 24
+  Stunden, Sitzungen 30 Tage.
 - Das Relay kennt sonst nur zufällige IDs, keine Namen oder Telefonnummern.
 - Positionen löscht es mit der Abholung durch den ELW, spätestens nach 24 Stunden (stündlicher Cron).
 - App-IDs ohne Kontakt löscht es nach 90 Tagen, ELW-Zugänge nach einem Jahr.
@@ -318,7 +342,7 @@ Die Testmail an `probe@` kommt lokal nicht an, die Statusseite zeigt den Empfang
 npx wrangler dev --port 8787 --local-upstream localhost:8787 --var CLOUD_URL:http://localhost:8787 --var CLOUD_DEV:1
 ```
 
-und `http://localhost:8787` öffnen. `CLOUD_DEV` schreibt Anmeldecodes und Einladungen ins Log statt sie zu mailen und
+und `http://localhost:8787` öffnen. `CLOUD_DEV` schreibt Mails des Portals (Bestätigungs- und Passwort-Links, Einladungen) ins Log statt sie zu mailen und
 prüft die Origin nicht (`wrangler dev` schreibt den Kopf um). Nur lokal setzen! Zum Arbeiten an der Oberfläche
 `npm --prefix portal run dev` (http://localhost:5174, leitet `/v1` an :8787 weiter). ELVIS dazu mit
 `ELVIS_APP_RELAY_URL=http://localhost:8787 ELVIS_CLOUD_URL=http://localhost:8787` starten.

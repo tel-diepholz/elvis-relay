@@ -1,10 +1,10 @@
 import type { FireboardLibrary } from '../../src/fireboardprotocol';
-import type { CloudRole, InstallationStatus, InvitationInfo, Me, NodeDetail } from '../../src/cloudprotocol';
+import type { AdminAccount, AdminLogEntry, AdminOverview, CloudRole, InstallationStatus, InvitationInfo, Me, NodeDetail } from '../../src/cloudprotocol';
 import type { PortalRecord, RecordDataMap, RecordKind } from '../../src/syncprotocol';
 
 export type { PortalRecord, RecordDataMap, RecordKind } from '../../src/syncprotocol';
 
-export type { CloudNode, CloudRole, InstallationStatus, InvitationInfo, Me, NodeDetail } from '../../src/cloudprotocol';
+export type { AdminAccount, AdminLogEntry, AdminOverview, CloudNode, CloudNodeRef, CloudRole, InstallationStatus, InvitationInfo, Me, NodeDetail } from '../../src/cloudprotocol';
 
 export const ROLE_LABELS: Record<CloudRole, string> = { viewer: 'Lesen', editor: 'Pflegen', admin: 'Verwalten' };
 export const ROLE_HINTS: Record<CloudRole, string> = {
@@ -40,9 +40,26 @@ const node = (id: string) => `/v1/cloud/nodes/${encodeURIComponent(id)}`;
 export const api = {
   me: () => request<Me>('GET', '/v1/cloud/me'),
   rename: (name: string) => request<Me>('PATCH', '/v1/cloud/me', { name }),
-  login: (email: string) => request<{ ok: true }>('POST', '/v1/cloud/login', { email }),
-  verify: (email: string, code: string, name?: string) => request<Me>('POST', '/v1/cloud/login/verify', { email, code, name }),
+  /** 202 { verify: true } = Bestätigungsmail unterwegs; mit gültiger Einladung direkt angemeldet (Me) */
+  register: (email: string, name: string, password: string, invitation?: string) => request<Me | { verify: true }>('POST', '/v1/cloud/register', { email, name, password, invitation }),
+  login: (email: string, password: string) => request<Me>('POST', '/v1/cloud/login', { email, password }),
+  verify: (token: string) => request<Me>('POST', '/v1/cloud/verify', { token }),
+  resendVerify: (email: string) => request<{ ok: true }>('POST', '/v1/cloud/verify/resend', { email }),
+  forgotPassword: (email: string) => request<{ ok: true }>('POST', '/v1/cloud/password/forgot', { email }),
+  resetPassword: (token: string, password: string) => request<Me>('POST', '/v1/cloud/password/reset', { token, password }),
+  changePassword: (current: string, password: string) => request<{ ok: true }>('POST', '/v1/cloud/password', { current, password }),
+  changeEmail: (email: string, password: string) => request<{ email: string }>('POST', '/v1/cloud/email', { email, password }),
+  confirmEmail: (token: string) => request<{ email: string }>('POST', '/v1/cloud/email/confirm', { token }),
+  logoutOthers: () => request<{ ended: number }>('POST', '/v1/cloud/logout/others', {}),
+  deleteAccount: (password: string) => request<null>('DELETE', '/v1/cloud/me', { password }),
   logout: () => request<null>('POST', '/v1/cloud/logout', {}),
+  // Verwaltung (nur Betreiber)
+  adminOverview: (q = '') => request<AdminOverview>('GET', `/v1/cloud/admin${q ? `?q=${encodeURIComponent(q)}` : ''}`),
+  adminLog: () => request<AdminLogEntry[]>('GET', '/v1/cloud/admin/log'),
+  adminPatch: (id: string, patch: { name?: string; email?: string; operator?: boolean; disabled?: boolean }) => request<AdminAccount>('PATCH', `/v1/cloud/admin/accounts/${id}`, patch),
+  adminAction: (id: string, action: 'reset-link' | 'verify' | 'unlock' | 'logout') => request<AdminAccount>('POST', `/v1/cloud/admin/accounts/${id}/${action}`, {}),
+  adminMembership: (id: string, nodeId: string, role: CloudRole | null) => request<AdminAccount>('PUT', `/v1/cloud/admin/accounts/${id}/membership`, { nodeId, role }),
+  adminDelete: (id: string) => request<null>('DELETE', `/v1/cloud/admin/accounts/${id}`),
 
   node: (id: string) => request<NodeDetail>('GET', node(id)),
   createNode: (parentId: string, name: string) => request<NodeDetail>('POST', '/v1/cloud/nodes', { parentId, name }),
