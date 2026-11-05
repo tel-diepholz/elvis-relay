@@ -9,10 +9,21 @@ workers_dev = true
 routes = [
   { pattern = "relay.einsatzleitwagen.app", custom_domain = true },
   { pattern = "openpgpkey.einsatzleitwagen.app", custom_domain = true },
+  # Portal des Cloud-Zugangs (Oberfläche aus portal/dist, API unter /v1/cloud)
+  { pattern = "cloud.einsatzleitwagen.app", custom_domain = true },
 ]
+
+# Gebaute Portal-Oberfläche; der Worker entscheidet selbst (run_worker_first), unter cloud.… liefert er sie aus
+[assets]
+directory = "portal/dist"
+binding = "ASSETS"
+run_worker_first = true
+not_found_handling = "single-page-application"
 
 [vars]
 MAIL_DOMAIN = "einsatzleitwagen.app"
+# Portal des Cloud-Zugangs (Links in Anmelde- und Einladungsmails)
+CLOUD_URL = "https://cloud.einsatzleitwagen.app"
 RELAY_URL = "https://relay.einsatzleitwagen.app"
 # "manual": Postfächer nach der Bestätigung erst nach Freigabe durch den Betreiber aktiv (siehe README)
 MAIL_APPROVAL = ""

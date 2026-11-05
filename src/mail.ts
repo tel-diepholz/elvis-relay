@@ -143,7 +143,10 @@ async function checkRevocation(armored: string, publicKey: string): Promise<bool
 // --- Signierte Abrufe ---
 
 /** Signierten Aufruf prüfen (Mail-Abruf, Cloud Messaging): Ed25519-Schlüssel des Postfachs, Zeitfenster, Nonce einmalig */
-export async function verifySignature(req: Request, raw: Uint8Array, mailbox: MailboxRow, db: D1Database, now: Date): Promise<boolean> {
+export const verifySignature = (req: Request, raw: Uint8Array, mailbox: MailboxRow, db: D1Database, now: Date) => verifySigned(req, raw, mailbox.sig_public_key, db, now);
+
+/** Signierten Aufruf gegen einen Ed25519-Schlüssel (raw, base64url) prüfen: Zeitfenster, Nonce nur einmal */
+export async function verifySigned(req: Request, raw: Uint8Array, sigPublicKey: string, db: D1Database, now: Date): Promise<boolean> {
   const header = req.headers.get(MAIL_SIGNATURE_HEADER) ?? '';
   const parts = Object.fromEntries(header.split(',').map((p) => p.trim().split('=', 2) as [string, string]));
   const t = Number(parts.t);
@@ -155,7 +158,7 @@ export async function verifySignature(req: Request, raw: Uint8Array, mailbox: Ma
   const payload = mailSignaturePayload(req.method, url.pathname + url.search, await sha256Hex(raw), t, nonce);
   let ok = false;
   try {
-    const key = await crypto.subtle.importKey('raw', fromBase64url(mailbox.sig_public_key), { name: 'Ed25519' }, false, ['verify']);
+    const key = await crypto.subtle.importKey('raw', fromBase64url(sigPublicKey), { name: 'Ed25519' }, false, ['verify']);
     ok = await crypto.subtle.verify({ name: 'Ed25519' }, key, fromBase64url(sig), new TextEncoder().encode(payload));
   } catch {
     return false;
@@ -168,7 +171,7 @@ export async function verifySignature(req: Request, raw: Uint8Array, mailbox: Ma
 
 // --- Mails des Relays ---
 
-async function sendSystemMail(env: Env, mail: Omit<MimeMail, 'from'>): Promise<void> {
+export async function sendSystemMail(env: Env, mail: Omit<MimeMail, 'from'>): Promise<void> {
   if (!env.SEND) throw new Error('Kein Mailversand konfiguriert');
   const from = `ELVIS Relay <noreply@${mailDomain(env)}>`;
   await env.SEND(addressOf(from), mail.to, buildMime({ ...mail, from }));

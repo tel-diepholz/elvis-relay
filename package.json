@@ -7,8 +7,9 @@
   "description": "Cloud-Relay der ELVIS-App (Cloudflare Worker + D1)",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler d1 migrations apply elvis-relay --remote && wrangler deploy",
-    "typecheck": "tsc -p .",
+    "build:portal": "npm --prefix portal ci && npm --prefix portal run build",
+    "deploy": "npm run build:portal && wrangler d1 migrations apply elvis-relay --remote && wrangler deploy",
+    "typecheck": "tsc -p . && npm --prefix portal run typecheck",
     "test": "vitest run"
   },
   "dependencies": {
