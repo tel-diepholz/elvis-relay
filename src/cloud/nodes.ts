@@ -86,17 +86,17 @@ export async function childNodes(db: D1Database, n: NodeRow, role: CloudRole | n
 
 /** Alle Knoten-IDs unterhalb (nur angelegte; ARS-Knoten ohne Daten gibt es nicht in der Tabelle) */
 export async function descendantIds(db: D1Database, id: string): Promise<string[]> {
-  const out: string[] = [];
-  let frontier = [id];
-  for (let depth = 0; frontier.length && depth < MAX_DEPTH; depth++) {
-    const rows = await db
-      .prepare(`SELECT id FROM nodes WHERE parent_id IN (${frontier.map(() => '?').join(',')})`)
-      .bind(...frontier)
-      .all<{ id: string }>();
-    frontier = rows.results.map((r) => r.id);
-    out.push(...frontier);
-  }
-  return out;
+  // Eine rekursive Abfrage statt IN-Listen: D1 erlaubt höchstens 100 Parameter je Abfrage (unter „Deutschland“ liegen viele Knoten)
+  const rows = await db
+    .prepare(
+      `WITH RECURSIVE d(id, depth) AS (
+         SELECT id, 1 FROM nodes WHERE parent_id = ?
+         UNION ALL SELECT n.id, d.depth + 1 FROM nodes n JOIN d ON n.parent_id = d.id WHERE d.depth < ?
+       ) SELECT id FROM d ORDER BY depth`,
+    )
+    .bind(id, MAX_DEPTH)
+    .all<{ id: string }>();
+  return rows.results.map((r) => r.id);
 }
 
 export { CLOUD_ROLES };
