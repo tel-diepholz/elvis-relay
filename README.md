@@ -268,6 +268,20 @@ Knoten und hat eine Revision. `seq` ist der Änderungszähler, Gelöschtes bleib
   Grenzen sind auf 15 m vereinfacht, je Kreis eine Datei. Das Portal lädt nur die Kreise, die ein Punkt braucht. Neu
   erzeugen, wenn VG250 erscheint (jährlich zum 01.01.).
 
+## Wartung der Objektbibliothek
+
+Datensätze der Stammdaten (`md_records`) **nie mit `DELETE` löschen**. Verknüpfte ELVIS-Installationen holen Änderungen
+über die laufende Nummer `seq`. Eine harte Löschung erreicht sie nicht, und mit den Zeilen verschwinden auch die
+vordefinierten Typen.
+
+- `scripts/sql/objekte-loeschen.sql`: Markiert alle Objekte und Dateien als gelöscht, mit neuer `seq` je Datensatz
+  (wie das Portal). Typen und übrige Stammdaten bleiben. Ein einzelner Bereich geht über einen Filter auf `node_id`.
+- `scripts/sql/typen-wiederherstellen.sql`: Legt die vordefinierten Typen *Wasserentnahmestelle* und *Einsatzobjekt*
+  neu an, falls sie fehlen.
+
+Aufruf jeweils mit `npx wrangler d1 execute elvis-relay --remote --file <Datei>`, vorher am besten
+`npx wrangler d1 export elvis-relay --remote --output vorher.sql`.
+
 ## Datenschutz
 
 - Personalbögen verschlüsselt der Browser mit dem öffentlichen Schlüssel des ELW (RSA-OAEP-256 + AES-256-GCM,
