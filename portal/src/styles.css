@@ -164,3 +164,20 @@ label.field { display: grid; gap: 4px; font-size: 13px; font-weight: 600; color:
   .who .name { display: none; }
 }
 label.field input, label.field select { font-weight: 400; color: var(--text); }
+.tabs { display: flex; flex-wrap: wrap; gap: 4px; border-bottom: 1px solid var(--border); }
+.tab {
+  border: 0; background: none; padding: 8px 12px; cursor: pointer; font-weight: 600; color: var(--muted);
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+.tab.active { color: var(--text); border-bottom-color: var(--accent); }
+.record-form { box-shadow: none; background: var(--bg); }
+.field { display: grid; gap: 4px; font-size: 13px; font-weight: 600; color: var(--muted); }
+.check-inline { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+.check-inline input { width: auto; min-height: 0; }
+.lib-map { height: 380px; border-radius: 8px; overflow: hidden; border: 1px solid var(--border); }
+.mini-map { height: 240px; border-radius: 8px; overflow: hidden; border: 1px solid var(--border); }
+.dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; }
+.link-button { border: 0; background: none; padding: 0; cursor: pointer; text-align: left; font: inherit; font-weight: 600; color: var(--text); }
+.link-button:hover { text-decoration: underline; }
+fieldset.plain { border: 0; padding: 0; margin: 0; min-width: 0; display: grid; gap: 12px; }
+textarea { font: inherit; width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); }

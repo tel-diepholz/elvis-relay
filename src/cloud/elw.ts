@@ -4,6 +4,9 @@ import { verifySigned } from '../mail.js';
 import type { Env } from '../relay.js';
 import { nodeRef } from './nodes.js';
 import type { InstallationRow } from './status.js';
+import { blobKey, pull, visibleFile, writeRecord } from './records.js';
+import { sha256Hex } from '../http.js';
+import { LIBRARY_MAX_FILE_BYTES, syncPushSchema, type SyncPull, type SyncResult } from '../syncprotocol.js';
 
 interface LinkRequestRow {
   elw_id: string;
@@ -58,6 +61,49 @@ export async function handleElwCloud(req: Request, env: Env, elwId: string, path
     return fail(503, 'Kein freier Code, bitte erneut versuchen');
   }
 
+  // --- Stammdaten: abholen und eigene Änderungen senden (nur verknüpft, nur der eigene Knoten ist beschreibbar) ---
+  if (path === '/v1/elws/me/cloud/sync') {
+    if (!installation) return fail(409, 'Installation ist nicht verknüpft');
+    if (!(await signedBy(installation.sig_public_key))) return fail(401, 'Signatur ungültig');
+    if (req.method === 'GET') {
+      const after = Math.max(0, Math.floor(Number(new URL(req.url).searchParams.get('after') ?? 0)) || 0);
+      await db.prepare('UPDATE installations SET last_sync_at = ? WHERE elw_id = ?').bind(ts, elwId).run();
+      return json(200, { ...(await pull(db, installation.node_id, after)), nodeId: installation.node_id } satisfies SyncPull);
+    }
+    if (req.method === 'POST') {
+      let parsed;
+      try {
+        parsed = syncPushSchema.safeParse(JSON.parse(new TextDecoder().decode(raw)));
+      } catch {
+        return fail(400, 'Änderungen ungültig');
+      }
+      if (!parsed.success) return fail(400, 'Änderungen ungültig');
+      const by = `ELVIS ${installation.name}`;
+      const results: SyncResult[] = [];
+      for (const c of parsed.data.changes) {
+        results.push(await writeRecord(db, { ...c, data: c.data ?? null, nodeId: installation.node_id, by, mayWrite: async (node) => node === installation.node_id, blobs: env.LIBRARY }, now));
+      }
+      return json(200, { results });
+    }
+    return fail(405, 'Nicht erlaubt');
+  }
+
+  // --- Dateien der Objektbibliothek: erst hochladen, dann den Datensatz senden; abholen, was sichtbar ist ---
+  const file = /^\/v1\/elws\/me\/cloud\/files\/([0-9a-f-]{36})$/.exec(path);
+  if (file) {
+    if (!installation) return fail(409, 'Installation ist nicht verknüpft');
+    if (!env.LIBRARY) return fail(503, 'Dateien sind auf diesem Relay nicht eingerichtet');
+    if (!(await signedBy(installation.sig_public_key))) return fail(401, 'Signatur ungültig');
+    const uid = file[1]!;
+    if (req.method === 'PUT') return storeUpload(env, uid, installation.node_id, raw, now);
+    if (req.method === 'GET') {
+      if (!(await visibleFile(db, installation.node_id, uid))) return fail(404, 'Datei nicht gefunden');
+      const obj = await env.LIBRARY.get(blobKey(uid));
+      return obj ? new Response(obj.body, { headers: { 'content-type': 'application/octet-stream' } }) : fail(404, 'Datei nicht gefunden');
+    }
+    return fail(405, 'Nicht erlaubt');
+  }
+
   if (path === '/v1/elws/me/cloud') {
     if (installation) {
       if (!(await signedBy(installation.sig_public_key))) return fail(401, 'Signatur ungültig');
@@ -90,4 +136,15 @@ export async function handleElwCloud(req: Request, env: Env, elwId: string, path
     return fail(405, 'Nicht erlaubt');
   }
   return fail(404, 'Nicht gefunden');
+}
+
+/** Datei ablegen, solange es noch keinen Datensatz dazu gibt (Dateien sind unveränderlich) */
+export async function storeUpload(env: Env, uid: string, nodeId: string, raw: Uint8Array, now: Date): Promise<Response> {
+  if (!env.LIBRARY) return fail(503, 'Dateien sind auf diesem Relay nicht eingerichtet');
+  if (raw.byteLength > LIBRARY_MAX_FILE_BYTES) return fail(413, 'Datei zu groß (höchstens 50 MB)');
+  if (await env.DB.prepare('SELECT 1 FROM md_records WHERE uid = ?').bind(uid).first()) return fail(409, 'Datei gibt es schon');
+  const sha256 = await sha256Hex(raw);
+  await env.LIBRARY.put(blobKey(uid), raw);
+  await env.DB.prepare('INSERT OR REPLACE INTO library_uploads (uid, node_id, size, sha256, created_at) VALUES (?, ?, ?, ?, ?)').bind(uid, nodeId, raw.byteLength, sha256, now.toISOString()).run();
+  return json(201, { uid, size: raw.byteLength, sha256 });
 }

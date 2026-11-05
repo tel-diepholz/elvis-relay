@@ -55,6 +55,11 @@ bucket_name = "elvis-backups"
 binding = "MESSAGING"
 bucket_name = "elvis-messaging"
 
+# Dateien der Objektbibliothek (Feuerwehrpläne usw. an Objekten, lib/<uid>)
+[[r2_buckets]]
+binding = "LIBRARY"
+bucket_name = "elvis-library"
+
 # WebSocket je ELVIS-Installation fürs Cloud Messaging (Push statt Abruf; Hibernation, schläft ohne Verkehr)
 [[durable_objects.bindings]]
 name = "ELW_SOCKET"

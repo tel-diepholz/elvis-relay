@@ -3,6 +3,8 @@ import { FolderPlus, Link2, Mail, Pencil, Search, Trash2, Truck, Users, X } from
 import { ROLE_HINTS, ROLE_LABELS, api, type CloudRole, type InstallationStatus, type Me, type NodeDetail } from '../api';
 import { Crumbs, InstallationCard, RoleBadge } from '../components';
 import { Link, navigate, nodeUrl } from '../router';
+import { RecordsSection } from './RecordsSection';
+import { LibrarySection } from './LibrarySection';
 
 const ROLES: CloudRole[] = ['viewer', 'editor', 'admin'];
 const KIND_LABELS: Record<string, string> = { country: 'Staat', land: 'Land', kreis: 'Kreis', verband: 'Gemeindeverband', gemeinde: 'Gemeinde', free: 'eigener Knoten' };
@@ -133,6 +135,10 @@ export function NodePage({ id, me }: { id: string; me: Me }) {
           </form>
         )}
       </section>
+
+      <RecordsSection nodeId={id} canEdit={node.role === 'editor' || node.role === 'admin'} />
+
+      <LibrarySection nodeId={id} canEdit={node.role === 'editor' || node.role === 'admin'} />
 
       <section className="card">
         <div className="card-head">

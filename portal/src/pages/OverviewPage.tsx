@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import { Building, RefreshCw, Truck } from 'lucide-react';
+import { Building, Link2, RefreshCw, Truck } from 'lucide-react';
 import { api, type InstallationStatus, type Me } from '../api';
 import { InstallationCard, RoleBadge } from '../components';
 import { Link, nodeUrl } from '../router';
@@ -20,6 +20,22 @@ export function OverviewPage({ me, onMe }: { me: Me; onMe: (me: Me) => void }) {
     return () => clearInterval(t);
   }, []);
   const saveName = (e: FormEvent) => (e.preventDefault(), void api.rename(name.trim()).then(onMe));
+
+  // Verknüpfen direkt hier: an einem Bereich, den man verwaltet (Unterbereiche über deren Seite)
+  const adminAreas = me.memberships.filter((m) => m.role === 'admin');
+  const [code, setCode] = useState('');
+  const [area, setArea] = useState('');
+  const [linkMsg, setLinkMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const link = (e: FormEvent) => {
+    e.preventDefault();
+    const nodeId = area || adminAreas[0]?.node.id;
+    if (!nodeId) return;
+    setLinkMsg(null);
+    api
+      .link(code, nodeId)
+      .then((s) => (setLinkMsg({ ok: true, text: `„${s.name}“ mit ${s.node.path.join(' › ') || 'Deutschland'} verknüpft` }), setCode(''), void load()))
+      .catch((err: Error) => setLinkMsg({ ok: false, text: err.message }));
+  };
 
   return (
     <>
@@ -66,6 +82,47 @@ export function OverviewPage({ me, onMe }: { me: Me; onMe: (me: Me) => void }) {
           </ul>
         )}
       </section>
+      <section className="card">
+        <div className="card-head">
+          <h2>
+            <Link2 size={18} /> Installation verknüpfen
+          </h2>
+        </div>
+        <p className="muted small">
+          In ELVIS unter <em>Einstellungen → Cloud-Zugang</em> „Verknüpfungscode anfordern“ wählen und den Code hier eingeben. Für einen Unterbereich (z. B. eine Gemeinde im
+          Kreis) geht das auch auf dessen Seite unter „Installationen hier“.
+        </p>
+        {adminAreas.length === 0 ? (
+          <p className="notice">
+            Verknüpfen dürfen Verwalter eines Bereichs. {me.memberships.length ? 'Sie haben hier nur lesende bzw. pflegende Rechte.' : 'Ihr Konto hat noch keinen Bereich.'} Ein Verwalter Ihres
+            Landkreises oder Ihrer Gemeinde lädt Sie mit der Rolle „Verwalten“ ein; die ersten Verwalter setzt der Betreiber ein.
+          </p>
+        ) : (
+          <form className="row" onSubmit={link}>
+            <label className="field grow">
+              Verknüpfungscode
+              <input value={code} onChange={(e) => setCode(e.target.value.toUpperCase())} placeholder="ABCD-EFGH" maxLength={9} autoComplete="off" />
+            </label>
+            {adminAreas.length > 1 && (
+              <label className="field grow">
+                Bereich
+                <select value={area || adminAreas[0]!.node.id} onChange={(e) => setArea(e.target.value)}>
+                  {adminAreas.map((m) => (
+                    <option key={m.node.id} value={m.node.id}>
+                      {m.node.path.join(' › ') || 'Deutschland'}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            <button className="btn btn-primary" disabled={code.replace(/[\s-]/g, '').length !== 8}>
+              <Link2 size={16} /> Installation verknüpfen
+            </button>
+          </form>
+        )}
+        {adminAreas.length === 1 && <p className="small muted">wird verknüpft mit {adminAreas[0]!.node.path.join(' › ') || 'Deutschland'}</p>}
+        {linkMsg && <p className={linkMsg.ok ? 'notice ok' : 'error'}>{linkMsg.text}</p>}
+      </section>
       <section>
         <div className="card-head" style={{ marginBottom: 12 }}>
           <h2>
@@ -79,7 +136,7 @@ export function OverviewPage({ me, onMe }: { me: Me; onMe: (me: Me) => void }) {
         {installations === null ? (
           <p className="muted">Lädt …</p>
         ) : installations.length === 0 ? (
-          <p className="muted">Keine. Verknüpfen lässt sich eine Installation auf der Seite eines Bereichs mit dem Code aus ELVIS (Einstellungen → Cloud).</p>
+          <p className="muted">Keine. Verknüpfen geht oben mit dem Code aus ELVIS (Einstellungen → Cloud-Zugang).</p>
         ) : (
           <div className="grid">
             {installations.map((s) => (
