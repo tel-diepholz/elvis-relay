@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
 import { CircleMarker, MapContainer, TileLayer, Tooltip, useMap, useMapEvents } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
-import { FileText, Library, Lock, Paperclip, Pencil, Plus, Trash2, Upload, X } from 'lucide-react';
+import { Download, FileText, Library, Lock, Paperclip, Pencil, Plus, Trash2, Upload, X } from 'lucide-react';
+import { FireboardImport } from './FireboardImport';
 import { api, type PortalRecord, type RecordDataMap } from '../api';
 import type { ObjectVisibility } from '../../../src/syncprotocol';
 
@@ -305,6 +306,7 @@ export function LibrarySection({ nodeId, canEdit }: { nodeId: string; canEdit: b
   const [editingType, setEditingType] = useState<TypeRec | 'new' | null>(null);
   const [editing, setEditing] = useState<ObjRec | 'new' | null>(null);
   const [importText, setImportText] = useState<string | null>(null);
+  const [fireboard, setFireboard] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -366,14 +368,32 @@ export function LibrarySection({ nodeId, canEdit }: { nodeId: string; canEdit: b
           <Library size={18} /> Objektbibliothek
         </h2>
         {canEdit && editingType === null && (
-          <button className="btn btn-sm" onClick={() => setEditingType('new')}>
-            <Plus size={14} /> Typ
-          </button>
+          <span className="row">
+            <button className="btn btn-sm" onClick={() => setFireboard(true)} disabled={fireboard}>
+              <Download size={14} /> Aus Fireboard
+            </button>
+            <button className="btn btn-sm" onClick={() => setEditingType('new')}>
+              <Plus size={14} /> Typ
+            </button>
+          </span>
         )}
       </div>
       <p className="muted small">Wasserentnahmestellen, Einsatzobjekte und eigene Typen. Wer die Objekte sieht, stellt der Typ ein; ELVIS zeigt sie unter Karte → Ebenen → Objektbibliothek.</p>
       {error && <p className="error">{error}</p>}
       {notice && <p className="notice ok">{notice}</p>}
+      {fireboard && (
+        <FireboardImport
+          nodeId={nodeId}
+          types={types}
+          objects={objects}
+          onClose={() => setFireboard(false)}
+          onDone={(msg) => {
+            setFireboard(false);
+            setNotice(msg);
+            void load();
+          }}
+        />
+      )}
       {editingType !== null && (
         <TypeForm
           initial={editingType === 'new' ? null : editingType.data}

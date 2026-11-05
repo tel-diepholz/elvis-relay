@@ -55,6 +55,8 @@ export interface Env extends BackupEnv {
   SEND?: Sender;
   /** Verschlüsselte Anhänge des Cloud Messagings bis zur Abholung */
   MESSAGING?: R2Bucket;
+  /** Abruf bei Fireboard (Import der Einsatzbibliothek); für Tests austauschbar */
+  FIREBOARD_FETCH?: typeof fetch;
   /** Ereignis sofort an den WebSocket einer Installation (index.ts, Durable Object ElwSocket) */
   NOTIFY?: (elwId: string, event: MessagingEvent) => Promise<void>;
   /** WebSocket-Upgrade an das Durable Object der Installation weiterreichen (index.ts) */
