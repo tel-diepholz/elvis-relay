@@ -62,7 +62,7 @@ export function InvitationPage({ token, me, onMe }: { token: string; me: Me | nu
               )
             )}
           </section>
-          {!me && !info.accepted && !info.expired && <LoginForm email={info.email} onLogin={onMe} />}
+          {!me && !info.accepted && !info.expired && <LoginForm email={info.email} invitation={token} initialMode="register" onLogin={onMe} />}
         </div>
       )}
     </div>

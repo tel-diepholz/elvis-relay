@@ -46,13 +46,26 @@ export type CloudLinkStatus =
 
 export const emailSchema = z.string().trim().toLowerCase().email('E-Mail-Adresse ungültig').max(200);
 
-export const loginRequestSchema = z.object({ email: emailSchema });
-export const loginVerifySchema = z.object({
+/** Passwörter: Länge statt Zeichenregeln (NIST SP 800-63B) */
+export const PASSWORD_MIN = 10;
+const password = z.string().min(PASSWORD_MIN, `Passwort: mindestens ${PASSWORD_MIN} Zeichen`).max(200, 'Passwort zu lang');
+const anyPassword = z.string().min(1, 'Passwort fehlt').max(200);
+const linkToken = z.string().regex(/^[A-Za-z0-9_-]{43}$/, 'Link ungültig');
+
+/** Konto anlegen; mit Einladung gilt die Adresse sofort als bestätigt (der Link kam an sie) */
+export const registerSchema = z.object({
   email: emailSchema,
-  code: z.string().trim().regex(/^\d{6}$/, 'Code: 6 Ziffern'),
-  /** Nur beim ersten Anmelden (neues Konto) */
-  name: z.string().trim().max(80).optional(),
+  name: z.string().trim().min(1, 'Name fehlt').max(80),
+  password,
+  invitation: linkToken.optional(),
 });
+export const loginSchema = z.object({ email: emailSchema, password: anyPassword });
+export const emailOnlySchema = z.object({ email: emailSchema });
+export const linkTokenSchema = z.object({ token: linkToken });
+export const resetPasswordSchema = z.object({ token: linkToken, password });
+export const changePasswordSchema = z.object({ current: anyPassword, password });
+export const changeEmailSchema = z.object({ email: emailSchema, password: anyPassword });
+export const deleteAccountSchema = z.object({ password: anyPassword });
 
 export const CLOUD_ROLES = ['viewer', 'editor', 'admin'] as const;
 export type CloudRole = (typeof CLOUD_ROLES)[number];
@@ -61,10 +74,15 @@ export const roleRank = (r: CloudRole | null) => (r ? CLOUD_ROLES.indexOf(r) + 1
 
 export const SESSION_COOKIE = 'elvis_cloud';
 export const SESSION_TTL_MS = 30 * 24 * 3600_000;
-export const LOGIN_CODE_TTL_MS = 15 * 60_000;
-export const LOGIN_MAX_ATTEMPTS = 5;
-/** Codes je Adresse und Stunde */
-export const LOGIN_MAILS_PER_HOUR = 5;
+/** Bestätigungslink nach dem Registrieren bzw. für eine neue E-Mail-Adresse */
+export const VERIFY_TTL_MS = 24 * 3600_000;
+/** Link „Passwort zurücksetzen“ */
+export const RESET_TTL_MS = 3600_000;
+/** Nach so vielen falschen Passwörtern ist das Konto kurz gesperrt */
+export const LOGIN_MAX_FAILURES = 5;
+export const LOGIN_LOCK_MS = 15 * 60_000;
+/** Mails (Bestätigung, Zurücksetzen) je Adresse und Stunde */
+export const ACCOUNT_MAILS_PER_HOUR = 5;
 export const INVITATION_TTL_MS = 14 * 24 * 3600_000;
 
 export interface CloudAccount {
