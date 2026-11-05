@@ -5,6 +5,8 @@ import { MAIL_SIGNATURE_HEADER, mailSignaturePayload } from './mailprotocol.js';
 import type { ElwRegistration } from './protocol.js';
 import { cleanup, handle, type Env } from './relay.js';
 import { fakeD1, fakeR2 } from './testing.js';
+import type { FireboardLibrary } from './fireboardprotocol.js';
+import { FIREBOARD_TREE } from './fireboard.test.js';
 
 let env: Env;
 let now: Date;
@@ -504,5 +506,35 @@ describe('Objektbibliothek in der Cloud', () => {
     ];
     const r = await portal<{ created: number; errors: { index: number }[] }>('POST', '/v1/cloud/records/batch', { cookie: kreis.cookie, body: { kind: 'object', nodeId: KREIS, items } });
     expect(r.body).toMatchObject({ created: 2, errors: [{ index: 1 }] });
+  });
+
+  it('Import aus Fireboard: nur mit Pflegerecht, Zugangsdaten gehen nur an Fireboard', async () => {
+    const { kreis } = await setup();
+    const weyhe = await invite(kreis.cookie, WEYHE, 'wf@weyhe.de', 'editor');
+    const seen: string[] = [];
+    env.FIREBOARD_FETCH = (async (url: string, init: RequestInit = {}) => {
+      seen.push(`${init.method ?? 'GET'} ${url}`);
+      const path = new URL(url).pathname;
+      if (path === '/' && !init.method) return new Response('<input type="hidden" name="_csrf" value="t">');
+      if (path === '/') return new URLSearchParams(String(init.body)).get('LoginForm[password]') === 'geheim' ? new Response(null, { status: 302, headers: { location: '/dashboard' } }) : new Response('Fehler');
+      return Response.json(FIREBOARD_TREE);
+    }) as typeof fetch;
+    const body = { nodeId: KREIS, email: 'kbm@lk-diepholz.de', password: 'geheim' };
+    // Weyhe pflegt nur den eigenen Bereich
+    expect((await portal('POST', '/v1/cloud/import/fireboard', { cookie: weyhe.cookie, body })).status).toBe(403);
+    expect(seen).toEqual([]);
+    expect((await portal('POST', '/v1/cloud/import/fireboard', { cookie: kreis.cookie, body: { ...body, password: 'falsch' } })).status).toBe(400);
+    const r = await portal<FireboardLibrary>('POST', '/v1/cloud/import/fireboard', { cookie: kreis.cookie, body });
+    expect(r.status).toBe(200);
+    expect(r.body.categories.find((c) => c.suggestion === 'water')).toBeTruthy();
+    expect(r.body.items).toHaveLength(5);
+    expect(seen.every((s) => s.includes('https://login.fireboard.net/'))).toBe(true);
+    // Mit Herkunft importiert, wie es das Portal tut
+    const item = r.body.items[0]!;
+    const imp = await portal<{ created: number }>('POST', '/v1/cloud/records/batch', {
+      cookie: kreis.cookie,
+      body: { kind: 'object', nodeId: KREIS, items: [{ typeUid: WATER, name: item.name, lat: item.lat, lon: item.lon, notes: item.notes, props: { art: item.art, dn: item.dn }, source: `fireboard:${item.id}` }] },
+    });
+    expect(imp.body.created).toBe(1);
   });
 });

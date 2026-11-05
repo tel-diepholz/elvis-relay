@@ -181,3 +181,11 @@ label.field input, label.field select { font-weight: 400; color: var(--text); }
 .link-button:hover { text-decoration: underline; }
 fieldset.plain { border: 0; padding: 0; margin: 0; min-width: 0; display: grid; gap: 12px; }
 textarea { font: inherit; width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
+
+/* Import aus Fireboard: Zuordnung Kategorie → Typ */
+.fb-table { max-height: 420px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+.fb-table table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.fb-table th { position: sticky; top: 0; background: var(--bg); text-align: left; padding: 8px 10px; color: var(--muted); }
+.fb-table td { padding: 6px 10px; border-top: 1px solid var(--border); }
+.fb-table td:nth-child(2) { text-align: right; font-variant-numeric: tabular-nums; }
+.fb-table select { width: 100%; }
