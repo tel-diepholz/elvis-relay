@@ -4,6 +4,8 @@ import { verifySigned } from '../mail.js';
 import type { Env } from '../relay.js';
 import { nodeRef } from './nodes.js';
 import type { InstallationRow } from './status.js';
+import { pull, writeRecord } from './records.js';
+import { syncPushSchema, type SyncPull, type SyncResult } from '../syncprotocol.js';
 
 interface LinkRequestRow {
   elw_id: string;
@@ -56,6 +58,33 @@ export async function handleElwCloud(req: Request, env: Env, elwId: string, path
       }
     }
     return fail(503, 'Kein freier Code, bitte erneut versuchen');
+  }
+
+  // --- Stammdaten: abholen und eigene Änderungen senden (nur verknüpft, nur der eigene Knoten ist beschreibbar) ---
+  if (path === '/v1/elws/me/cloud/sync') {
+    if (!installation) return fail(409, 'Installation ist nicht verknüpft');
+    if (!(await signedBy(installation.sig_public_key))) return fail(401, 'Signatur ungültig');
+    if (req.method === 'GET') {
+      const after = Math.max(0, Math.floor(Number(new URL(req.url).searchParams.get('after') ?? 0)) || 0);
+      await db.prepare('UPDATE installations SET last_sync_at = ? WHERE elw_id = ?').bind(ts, elwId).run();
+      return json(200, { ...(await pull(db, installation.node_id, after)), nodeId: installation.node_id } satisfies SyncPull);
+    }
+    if (req.method === 'POST') {
+      let parsed;
+      try {
+        parsed = syncPushSchema.safeParse(JSON.parse(new TextDecoder().decode(raw)));
+      } catch {
+        return fail(400, 'Änderungen ungültig');
+      }
+      if (!parsed.success) return fail(400, 'Änderungen ungültig');
+      const by = `ELVIS ${installation.name}`;
+      const results: SyncResult[] = [];
+      for (const c of parsed.data.changes) {
+        results.push(await writeRecord(db, { ...c, data: c.data ?? null, nodeId: installation.node_id, by, mayWrite: async (node) => node === installation.node_id }, now));
+      }
+      return json(200, { results });
+    }
+    return fail(405, 'Nicht erlaubt');
   }
 
   if (path === '/v1/elws/me/cloud') {

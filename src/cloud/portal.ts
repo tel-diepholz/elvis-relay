@@ -25,6 +25,8 @@ import { mailDomain, sendSystemMail } from '../mail.js';
 import type { Env } from '../relay.js';
 import { ROOT_ID, atLeast, childNodes, getNode, lineage, nodeRef, roleAt, toCloudNode } from './nodes.js';
 import { installationStatus, type InstallationRow } from './status.js';
+import { getRecord, listForNode, writeRecord } from './records.js';
+import { RECORD_KINDS, recordCreateSchema, recordUpdateSchema, type RecordKind } from '../syncprotocol.js';
 
 interface AccountRow {
   id: string;
@@ -239,6 +241,46 @@ export async function handlePortal(req: Request, env: Env, path: string, url: UR
     }
     await db.prepare('UPDATE invitations SET accepted_at = ? WHERE id = ?').bind(ts, row.id).run();
     return json(200, await me(db, account));
+  }
+
+  // --- Stammdaten ---
+
+  const recordsAt = /^\/v1\/cloud\/nodes\/([^/]+)\/records$/.exec(path);
+  if (recordsAt && req.method === 'GET') {
+    const nodeId = decodeURIComponent(recordsAt[1]!);
+    const kind = url.searchParams.get('kind') as RecordKind | null;
+    if (!kind || !RECORD_KINDS.includes(kind)) return fail(400, 'Art fehlt');
+    const r = await need(db, account, nodeId, 'viewer');
+    if (r instanceof Response) return r;
+    return json(200, await listForNode(db, nodeId, kind, (n) => roleAt(db, account, n)));
+  }
+  const mayEdit = async (nodeId: string) => atLeast(await roleAt(db, account, nodeId), 'editor');
+  const by = account.name ? `${account.name} (${account.email})` : account.email;
+  if (req.method === 'POST' && path === '/v1/cloud/records') {
+    const parsed = recordCreateSchema.safeParse(await body(req));
+    if (!parsed.success) return fail(400, 'Eingabe ungültig');
+    if (!(await getNode(db, parsed.data.nodeId))) return fail(404, 'Knoten nicht gefunden');
+    const res = await writeRecord(db, { uid: crypto.randomUUID(), kind: parsed.data.kind, nodeId: parsed.data.nodeId, baseRev: 0, deleted: false, data: parsed.data.data, by, mayWrite: mayEdit }, now);
+    return res.status === 'ok' ? json(201, res.record) : fail(res.status === 'invalid' ? 400 : 403, res.reason);
+  }
+  const recordPath = /^\/v1\/cloud\/records\/([0-9a-f-]{36})$/.exec(path);
+  if (recordPath) {
+    const current = await getRecord(db, recordPath[1]!);
+    if (!current || current.deleted) return fail(404, 'Datensatz nicht gefunden');
+    if (req.method === 'PUT' || req.method === 'DELETE') {
+      let baseRev = Number(url.searchParams.get('rev'));
+      let data: unknown = null;
+      if (req.method === 'PUT') {
+        const parsed = recordUpdateSchema.safeParse(await body(req));
+        if (!parsed.success) return fail(400, 'Eingabe ungültig');
+        baseRev = parsed.data.baseRev;
+        data = parsed.data.data;
+      }
+      const res = await writeRecord(db, { uid: current.uid, kind: current.kind, nodeId: current.nodeId, baseRev, deleted: req.method === 'DELETE', data, by, mayWrite: mayEdit }, now);
+      if (res.status === 'ok') return req.method === 'DELETE' ? json(204, null) : json(200, res.record);
+      return res.status === 'invalid' ? fail(400, res.reason) : json(409, { error: res.reason, record: res.record });
+    }
+    return fail(405, 'Nicht erlaubt');
   }
 
   // --- Baustruktur ---

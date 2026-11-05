@@ -222,3 +222,84 @@ describe('Installationen', () => {
     expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM link_requests').first()).toEqual({ n: 0 });
   });
 });
+
+describe('Stammdaten', () => {
+  /** Kreis- und Weyhe-Verwalter, je eine verknüpfte Installation (Kreis-ELW, ELW Weyhe) */
+  async function setup() {
+    const op = await operator();
+    const kreis = await invite(op.cookie, KREIS, 'kbm@lk-diepholz.de', 'admin');
+    const weyhe = await invite(kreis.cookie, WEYHE, 'wf@weyhe.de', 'editor');
+    const link = async (nodeId: string, name: string) => {
+      const elw = await installation();
+      const p = await elw.call<{ code: string }>('POST', '/v1/elws/me/cloud/link', { name, sigPublicKey: elw.sigPublicKey });
+      expect((await portal('POST', '/v1/cloud/installations', { cookie: kreis.cookie, body: { code: p.body.code, nodeId } })).status).toBe(201);
+      return elw;
+    };
+    return { kreis, weyhe, elwKreis: await link(KREIS, 'ELW Kreis'), elwWeyhe: await link(WEYHE, 'ELW 1 Weyhe') };
+  }
+  type Pull = { items: { uid: string; kind: string; nodeId: string; nodeName: string; rev: number; deleted: boolean; data: Record<string, unknown> | null }[]; next: number; more: boolean; nodeId: string };
+  type Result = { results: { uid: string; status: string; record: { rev: number; nodeId: string } | null; reason?: string }[] };
+
+  it('Kreis-Fahrzeuge sehen alle, Weyhe-Fahrzeuge auch der Kreis; Rollen nur nach unten', async () => {
+    const { kreis, weyhe, elwKreis, elwWeyhe } = await setup();
+    const elw = await portal<{ uid: string; rev: number }>('POST', '/v1/cloud/records', { cookie: kreis.cookie, body: { kind: 'force', nodeId: KREIS, data: { name: 'ELW 2 Kreis', callsign: 'Florian Diepholz 11-2' } } });
+    expect(elw.status).toBe(201);
+    // Pflegen in Weyhe, aber nicht am Kreis
+    expect((await portal('POST', '/v1/cloud/records', { cookie: weyhe.cookie, body: { kind: 'force', nodeId: KREIS, data: { name: 'x' } } })).status).toBe(403);
+    expect((await portal('POST', '/v1/cloud/records', { cookie: weyhe.cookie, body: { kind: 'role', nodeId: WEYHE, data: { name: 'Fernmelder Weyhe' } } })).status).toBe(201);
+    expect((await portal('POST', '/v1/cloud/records', { cookie: kreis.cookie, body: { kind: 'role', nodeId: KREIS, data: { name: 'Einsatzleiter' } } })).status).toBe(201);
+    expect((await portal('POST', '/v1/cloud/records', { cookie: kreis.cookie, body: { kind: 'keyword', nodeId: KREIS, data: { name: '' } } })).status).toBe(400);
+
+    // ELW Weyhe legt ein eigenes Fahrzeug an
+    const lf = crypto.randomUUID();
+    const push = await elwWeyhe.call<Result>('POST', '/v1/elws/me/cloud/sync', { changes: [{ uid: lf, kind: 'force', baseRev: 0, data: { name: 'HLF 20 Leeste', members: [] } }] });
+    expect(push.body.results[0]).toMatchObject({ status: 'ok', record: { rev: 1, nodeId: WEYHE } });
+
+    const weyhePull = await elwWeyhe.call<Pull>('GET', '/v1/elws/me/cloud/sync?after=0');
+    expect(weyhePull.body.nodeId).toBe(WEYHE);
+    expect(weyhePull.body.items.map((i) => [i.kind, i.data?.name, i.nodeName])).toEqual([
+      ['force', 'ELW 2 Kreis', 'Landkreis Diepholz'],
+      ['role', 'Fernmelder Weyhe', 'Weyhe'],
+      ['role', 'Einsatzleiter', 'Landkreis Diepholz'],
+      ['force', 'HLF 20 Leeste', 'Weyhe'],
+    ]);
+    const kreisPull = await elwKreis.call<Pull>('GET', '/v1/elws/me/cloud/sync?after=0');
+    expect(kreisPull.body.items.map((i) => i.data?.name)).toEqual(['ELW 2 Kreis', 'Einsatzleiter', 'HLF 20 Leeste']);
+
+    // Cursor: nur Neues
+    expect((await elwWeyhe.call<Pull>('GET', `/v1/elws/me/cloud/sync?after=${weyhePull.body.next}`)).body.items).toEqual([]);
+
+    // Weyhe darf das Kreis-Fahrzeug nicht ändern, der Kreis-ELW das Weyhe-Fahrzeug nicht
+    const foreign = await elwWeyhe.call<Result>('POST', '/v1/elws/me/cloud/sync', { changes: [{ uid: elw.body.uid, kind: 'force', baseRev: 1, data: { name: 'umbenannt' } }] });
+    expect(foreign.body.results[0]).toMatchObject({ status: 'conflict', record: { nodeId: KREIS } });
+    expect((await elwKreis.call<Result>('POST', '/v1/elws/me/cloud/sync', { changes: [{ uid: lf, kind: 'force', baseRev: 1, deleted: true }] })).body.results[0]!.status).toBe('conflict');
+  });
+
+  it('erkennt Konflikte und verteilt Löschungen als Tombstone', async () => {
+    const { weyhe, elwWeyhe } = await setup();
+    const uid = crypto.randomUUID();
+    await elwWeyhe.call('POST', '/v1/elws/me/cloud/sync', { changes: [{ uid, kind: 'keyword', baseRev: 0, data: { name: 'TH 1', sort: 0 } }] });
+    // Portal ändert, ELVIS schickt dann eine veraltete Änderung
+    expect((await portal('PUT', `/v1/cloud/records/${uid}`, { cookie: weyhe.cookie, body: { baseRev: 1, data: { name: 'TH Klein', sort: 0 } } })).status).toBe(200);
+    const stale = await elwWeyhe.call<Result>('POST', '/v1/elws/me/cloud/sync', { changes: [{ uid, kind: 'keyword', baseRev: 1, data: { name: 'TH 1 neu' } }] });
+    expect(stale.body.results[0]).toMatchObject({ status: 'conflict', record: { rev: 2 } });
+    expect((await portal('PUT', `/v1/cloud/records/${uid}`, { cookie: weyhe.cookie, body: { baseRev: 1, data: { name: 'x' } } })).status).toBe(409);
+
+    const before = (await elwWeyhe.call<Pull>('GET', '/v1/elws/me/cloud/sync?after=0')).body.next;
+    expect((await portal('DELETE', `/v1/cloud/records/${uid}?rev=2`, { cookie: weyhe.cookie })).status).toBe(204);
+    const after = await elwWeyhe.call<Pull>('GET', `/v1/elws/me/cloud/sync?after=${before}`);
+    expect(after.body.items).toMatchObject([{ uid, deleted: true, data: null, rev: 3 }]);
+
+    // Portalliste: sichtbar mit Bearbeitungsrecht und Lage
+    await portal('POST', '/v1/cloud/records', { cookie: weyhe.cookie, body: { kind: 'keyword', nodeId: WEYHE, data: { name: 'B 2' } } });
+    const list = await portal<{ data: { name: string }; editable: boolean; position: string }[]>('GET', `/v1/cloud/nodes/${encodeURIComponent(KREIS)}/records?kind=keyword`, { cookie: weyhe.cookie });
+    expect(list.status).toBe(403);
+    const here = await portal<{ data: { name: string }; editable: boolean; position: string }[]>('GET', `/v1/cloud/nodes/${encodeURIComponent(WEYHE)}/records?kind=keyword`, { cookie: weyhe.cookie });
+    expect(here.body.map((r) => [r.data.name, r.editable, r.position])).toEqual([['B 2', true, 'here']]);
+  });
+
+  it('Abruf nur verknüpft und signiert', async () => {
+    const elw = await installation();
+    expect((await elw.call('GET', '/v1/elws/me/cloud/sync?after=0')).status).toBe(409);
+  });
+});
