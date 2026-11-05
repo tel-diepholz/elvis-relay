@@ -176,6 +176,19 @@ unter `/v1/cloud` (`src/cloud/portal.ts`), Protokoll in `src/cloudprotocol.ts`.
     erst nach Bestätigung an die neue Adresse, Hinweis an die alte), überall sonst abmelden, Konto löschen. Wer einen
     Bereich als einziger verwaltet, kann sein Konto nicht löschen.
   - *Mails:* höchstens 5 je Adresse und Stunde. Links sind einmalig und nur als Hash gespeichert.
+- **Verwaltung (`/verwaltung`, nur Betreiber):** alle Konten mit Status (Betreiber, gesperrt, unbestätigt, ohne
+  Passwort, Fehlversuch-Sperre), letzter Anmeldung, aktiven Sitzungen und Rollen. Betreiber können:
+  - Name und E-Mail-Adresse ändern (die alte Adresse bekommt einen Hinweis),
+  - Betreiber ernennen oder entziehen,
+  - sperren (beendet alle Sitzungen, keine Anmeldung und kein Passwort-Link mehr) und entsperren,
+  - einen Link zum Zurücksetzen senden, die Adresse als bestätigt markieren, die Fehlversuch-Sperre aufheben,
+  - überall abmelden, löschen,
+  - Rollen in beliebigen Bereichen vergeben und entziehen.
+
+  Niemand kann sich selbst sperren oder entmachten, und es bleibt immer mindestens ein aktiver Betreiber. Alles steht im
+  Protokoll (`admin_log`, zwei Jahre). Den **ersten Betreiber** setzt man einmal von Hand:
+  `npx wrangler d1 execute elvis-relay --remote --command "UPDATE accounts SET operator = 1 WHERE email = 'name@example.org'"`.
+  Weitere ernennt er dann in der Verwaltung.
 - **Sitzung:** Cookie `elvis_cloud` (HttpOnly, Secure, SameSite=Strict, 30 Tage). Ändernde Aufrufe verlangen JSON und,
   wenn der Browser sie schickt, die eigene Origin.
 - **Baustruktur:** Gebietskörperschaften nach dem Amtlichen Regionalschlüssel (Knoten `ars:<ARS>`, aus dem

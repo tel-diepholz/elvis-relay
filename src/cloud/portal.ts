@@ -8,6 +8,10 @@ import {
   SESSION_COOKIE,
   SESSION_TTL_MS,
   CLOUD_ROLE_LABELS,
+  adminAccountPatchSchema,
+  adminMembershipSchema,
+  type AdminAction,
+  type AdminOverview,
   freeNodeSchema,
   invitationSchema,
   linkInstallationSchema,
@@ -29,6 +33,7 @@ import {
   type NodeDetail,
 } from '../cloudprotocol.js';
 import { hashPassword, verifyPassword } from './passwords.js';
+import { adminAccounts, adminLog, allNodes, logAdmin } from './admin.js';
 import { body, fail, hash, json, newToken } from '../http.js';
 import { mailDomain, sendSystemMail } from '../mail.js';
 import type { Env } from '../relay.js';
@@ -76,7 +81,7 @@ async function currentAccount(req: Request, db: D1Database, now: Date): Promise<
   const token = cookieToken(req);
   if (!token) return null;
   const row = await db
-    .prepare('SELECT a.id, a.email, a.name, a.operator FROM account_sessions s JOIN accounts a ON a.id = s.account_id WHERE s.token_hash = ? AND s.expires_at > ?')
+    .prepare('SELECT a.id, a.email, a.name, a.operator FROM account_sessions s JOIN accounts a ON a.id = s.account_id WHERE s.token_hash = ? AND s.expires_at > ? AND a.disabled_at IS NULL')
     .bind(await hash(token), now.toISOString())
     .first<AccountRow>();
   return row ? toAccount(row) : null;
@@ -205,7 +210,10 @@ export async function handlePortal(req: Request, env: Env, path: string, url: UR
     await db.prepare('DELETE FROM account_tokens WHERE token_hash = ?').bind(h).run();
     return row.expires_at > ts ? row : null;
   };
+  const DISABLED = 'Dieses Konto ist gesperrt – bitte an den Betreiber von ELVIS Cloud wenden';
   const startSession = async (account: AccountRow, extra: Record<string, string> = {}) => {
+    // Gesperrte Konten bekommen keine Sitzung (auch nicht über Bestätigungs- oder Passwort-Link)
+    if (await db.prepare('SELECT 1 FROM accounts WHERE id = ? AND disabled_at IS NOT NULL').bind(account.id).first()) return fail(423, DISABLED);
     await db.prepare('UPDATE accounts SET last_login_at = ?, failed_logins = 0, locked_until = NULL WHERE id = ?').bind(ts, account.id).run();
     const token = newToken();
     await db.prepare('INSERT INTO account_sessions (token_hash, account_id, created_at, expires_at) VALUES (?, ?, ?, ?)').bind(await hash(token), account.id, ts, later(now, SESSION_TTL_MS)).run();
@@ -229,8 +237,8 @@ export async function handlePortal(req: Request, env: Env, path: string, url: UR
       `Hallo${account.name ? ` ${account.name}` : ''},\n\nüber diesen Link legen Sie ein neues Passwort für ELVIS Cloud fest (gültig 1 Stunde):\n\n  ${cloudUrl(env)}/passwort-zuruecksetzen/${token}\n\nDanach sind Sie überall abgemeldet. Wenn Sie das nicht angefordert haben, ignorieren Sie diese Mail – Ihr Passwort bleibt dann unverändert.\n\nELVIS Cloud`,
     );
   };
-  const ACCOUNT_SELECT = 'SELECT id, email, name, operator, password_hash, email_verified_at, failed_logins, locked_until FROM accounts';
-  type AuthRow = AccountRow & { password_hash: string | null; email_verified_at: string | null; failed_logins: number; locked_until: string | null };
+  const ACCOUNT_SELECT = 'SELECT id, email, name, operator, password_hash, email_verified_at, failed_logins, locked_until, disabled_at FROM accounts';
+  type AuthRow = AccountRow & { password_hash: string | null; email_verified_at: string | null; failed_logins: number; locked_until: string | null; disabled_at: string | null };
 
   if (req.method === 'POST' && path === '/v1/cloud/register') {
     const parsed = registerSchema.safeParse(await body(req));
@@ -301,6 +309,7 @@ export async function handlePortal(req: Request, env: Env, path: string, url: UR
       }
       return fail(401, 'E-Mail-Adresse oder Passwort falsch');
     }
+    if (account.disabled_at) return fail(423, DISABLED);
     if (!account.email_verified_at) return fail(403, 'Bitte zuerst die E-Mail-Adresse über den Link in der Bestätigungsmail bestätigen');
     return startSession(account);
   }
@@ -310,7 +319,7 @@ export async function handlePortal(req: Request, env: Env, path: string, url: UR
     if (!parsed.success) return fail(400, 'E-Mail-Adresse ungültig');
     // Antwort immer gleich – ob es das Konto gibt, erfährt nur das Postfach
     const account = await db.prepare(`${ACCOUNT_SELECT} WHERE email = ?`).bind(parsed.data.email).first<AuthRow>();
-    if (account && (await mailBudget(account.email))) await sendReset(account);
+    if (account && !account.disabled_at && (await mailBudget(account.email))) await sendReset(account);
     return json(202, { ok: true });
   }
 
@@ -450,6 +459,116 @@ ELVIS Cloud`,
     }
     await db.prepare('UPDATE invitations SET accepted_at = ? WHERE id = ?').bind(ts, row.id).run();
     return json(200, await me(db, account));
+  }
+
+  // --- Verwaltung: alle Konten der Plattform (nur Betreiber) ---
+
+  if (path === '/v1/cloud/admin' || path.startsWith('/v1/cloud/admin/')) {
+    if (!account.operator) return fail(403, 'Nur für Betreiber');
+    const log = (target: string, action: AdminAction, detail = '') => logAdmin(db, ts, account.email, target, action, detail);
+    if (req.method === 'GET' && path === '/v1/cloud/admin') {
+      return json(200, { accounts: await adminAccounts(db, now, url.searchParams.get('q') ?? ''), nodes: await allNodes(db) } satisfies AdminOverview);
+    }
+    if (req.method === 'GET' && path === '/v1/cloud/admin/log') return json(200, await adminLog(db));
+
+    const m = /^\/v1\/cloud\/admin\/accounts\/([0-9A-Za-z-]{1,40})(?:\/(reset-link|verify|unlock|logout|membership))?$/.exec(path);
+    if (!m) return fail(404, 'Nicht gefunden');
+    const target = await db.prepare('SELECT id, email, name, operator, disabled_at FROM accounts WHERE id = ?').bind(m[1]).first<AccountRow & { disabled_at: string | null }>();
+    if (!target) return fail(404, 'Konto nicht gefunden');
+    const self = target.id === account.id;
+    const activeOperators = async () => (await db.prepare('SELECT COUNT(*) AS n FROM accounts WHERE operator = 1 AND disabled_at IS NULL').first<{ n: number }>())?.n ?? 0;
+    const result = async () => json(200, (await adminAccounts(db, now)).find((a) => a.id === target.id) ?? null);
+    const action = m[2];
+
+    if (!action && req.method === 'PATCH') {
+      const parsed = adminAccountPatchSchema.safeParse(await body(req));
+      if (!parsed.success) return fail(400, parsed.error.issues[0]?.message ?? 'Eingabe ungültig');
+      const p = parsed.data;
+      if (self && (p.operator === false || p.disabled === true)) return fail(409, 'Sich selbst sperren oder entmachten geht nicht');
+      if (target.operator === 1 && (p.operator === false || p.disabled === true) && (await activeOperators()) <= 1) return fail(409, 'Es muss mindestens einen aktiven Betreiber geben');
+      if (p.email && p.email !== target.email) {
+        if (await db.prepare('SELECT 1 FROM accounts WHERE email = ?').bind(p.email).first()) return fail(409, 'Diese Adresse gehört schon zu einem anderen Konto');
+        // Vom Betreiber gesetzt: gilt als bestätigt; die alte Adresse erfährt es
+        await db.prepare('UPDATE accounts SET email = ?, email_verified_at = ? WHERE id = ?').bind(p.email, ts, target.id).run();
+        await db.prepare("DELETE FROM account_tokens WHERE account_id = ? AND purpose = 'email'").bind(target.id).run();
+        await mail(env, target.email, 'ELVIS Cloud: E-Mail-Adresse geändert', `Hallo,\n\nder Betreiber von ELVIS Cloud hat die Adresse Ihres Kontos von ${target.email} auf ${p.email} geändert.\n\nELVIS Cloud`);
+        await log(target.email, 'edit', `E-Mail → ${p.email}`);
+      }
+      if (p.name !== undefined && p.name !== target.name) {
+        await db.prepare('UPDATE accounts SET name = ? WHERE id = ?').bind(p.name, target.id).run();
+        await log(p.email ?? target.email, 'edit', `Name → ${p.name}`);
+      }
+      if (p.operator !== undefined && p.operator !== (target.operator === 1)) {
+        await db.prepare('UPDATE accounts SET operator = ? WHERE id = ?').bind(p.operator ? 1 : 0, target.id).run();
+        await log(p.email ?? target.email, 'operator', p.operator ? 'zum Betreiber ernannt' : 'Betreiber-Recht entzogen');
+      }
+      if (p.disabled !== undefined && p.disabled !== !!target.disabled_at) {
+        if (p.disabled) {
+          await db.prepare('UPDATE accounts SET disabled_at = ?, disabled_by = ? WHERE id = ?').bind(ts, account.email, target.id).run();
+          await db.prepare('DELETE FROM account_sessions WHERE account_id = ?').bind(target.id).run();
+          await log(p.email ?? target.email, 'disable', 'gesperrt, Anmeldungen beendet');
+        } else {
+          await db.prepare('UPDATE accounts SET disabled_at = NULL, disabled_by = NULL WHERE id = ?').bind(target.id).run();
+          await log(p.email ?? target.email, 'enable', 'entsperrt');
+        }
+      }
+      return result();
+    }
+
+    if (!action && req.method === 'DELETE') {
+      if (self) return fail(409, 'Das eigene Konto unter „Mein Konto“ löschen');
+      if (target.operator === 1 && (await activeOperators()) <= 1) return fail(409, 'Es muss mindestens einen aktiven Betreiber geben');
+      const orphaned = await soleAdminOf(db, target.id);
+      if (orphaned.length) return fail(409, `${target.email} verwaltet ${orphaned.join(', ')} allein – erst jemand anderen als Admin einsetzen`);
+      await db.prepare('DELETE FROM accounts WHERE id = ?').bind(target.id).run();
+      await log(target.email, 'delete', target.name);
+      return json(204, null);
+    }
+
+    if (req.method === 'POST' && action === 'reset-link') {
+      if (target.disabled_at) return fail(409, 'Konto ist gesperrt – erst entsperren');
+      if (!(await sendReset(target))) return fail(503, 'Mail konnte nicht gesendet werden');
+      await log(target.email, 'reset-link', 'Link zum Zurücksetzen gesendet');
+      return result();
+    }
+    if (req.method === 'POST' && action === 'verify') {
+      await db.prepare('UPDATE accounts SET email_verified_at = COALESCE(email_verified_at, ?) WHERE id = ?').bind(ts, target.id).run();
+      await db.prepare("DELETE FROM account_tokens WHERE account_id = ? AND purpose = 'verify'").bind(target.id).run();
+      await log(target.email, 'verify', 'Adresse als bestätigt markiert');
+      return result();
+    }
+    if (req.method === 'POST' && action === 'unlock') {
+      await db.prepare('UPDATE accounts SET failed_logins = 0, locked_until = NULL WHERE id = ?').bind(target.id).run();
+      await log(target.email, 'unlock', 'Sperre nach Fehlversuchen aufgehoben');
+      return result();
+    }
+    if (req.method === 'POST' && action === 'logout') {
+      const r = await db.prepare('DELETE FROM account_sessions WHERE account_id = ?').bind(target.id).run();
+      await log(target.email, 'logout', `${r.meta.changes} Anmeldungen beendet`);
+      return result();
+    }
+    if (req.method === 'PUT' && action === 'membership') {
+      const parsed = adminMembershipSchema.safeParse(await body(req));
+      if (!parsed.success) return fail(400, 'Eingabe ungültig');
+      const { nodeId, role } = parsed.data;
+      const node = await nodeRef(db, nodeId);
+      if (!node) return fail(404, 'Knoten nicht gefunden');
+      const where = node.path.join(' › ') || 'Deutschland';
+      if (role === null) {
+        // Der letzte Admin eines Bereichs bleibt (sonst verwaltet ihn nur noch der Betreiber)
+        const res = await db.prepare('DELETE FROM memberships WHERE account_id = ? AND node_id = ?').bind(target.id, nodeId).run();
+        if (!res.meta.changes) return fail(404, 'Keine Rolle an diesem Knoten');
+        await log(target.email, 'role', `${where}: Rolle entzogen`);
+      } else {
+        await db
+          .prepare('INSERT INTO memberships (account_id, node_id, role, created_at, created_by) VALUES (?, ?, ?, ?, ?) ON CONFLICT(account_id, node_id) DO UPDATE SET role = excluded.role')
+          .bind(target.id, nodeId, role, ts, account.email)
+          .run();
+        await log(target.email, 'role', `${where}: ${CLOUD_ROLE_LABELS[role]}`);
+      }
+      return result();
+    }
+    return fail(405, 'Nicht erlaubt');
   }
 
   // --- Stammdaten ---
@@ -710,6 +829,8 @@ ELVIS Cloud`,
 export async function cloudCleanup(env: Env, now: Date): Promise<void> {
   const ts = now.toISOString();
   await env.DB.prepare('DELETE FROM account_tokens WHERE expires_at < ?').bind(ts).run();
+  // Protokoll der Verwaltung: zwei Jahre
+  await env.DB.prepare('DELETE FROM admin_log WHERE at < ?').bind(ago(now, 2 * 365 * 24 * 3600_000)).run();
   await env.DB.prepare('DELETE FROM login_mails WHERE sent_at < ?').bind(ago(now, 3600_000)).run();
   await env.DB.prepare('DELETE FROM account_sessions WHERE expires_at < ?').bind(ts).run();
   await env.DB.prepare('DELETE FROM invitations WHERE expires_at < ? AND accepted_at IS NULL').bind(ago(now, 30 * 24 * 3600_000)).run();
